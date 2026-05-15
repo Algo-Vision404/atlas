@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  # Metadata & Transactional Store
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: atlas
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: atlas
+    ports:
+      - "5432:5432"
+
+  # Cache & Frontier Queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Event Bus (Kafka Compatible)
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.2.1
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+
+  # Keyword Search Index
+  opensearch:
+    image: opensearchproject/opensearch:2.9.0
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - DISABLE_SECURITY_PLUGIN=true
+    ports:
+      - "9200:9200"
+
+  # Vector Search Index
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+
+  # Graph Database
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      - NEO4J_AUTH=neo4j/password
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+
+  # Analytics Store
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+
+  # ATLAS Services (Example placement)
+  # In production, these would be separate deployments
+  # ATLAS Services
+  search-api:
+    build: 
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    env_file: ../../.env
+    depends_on:
+      - postgres
+      - qdrant
+      - opensearch
+
+  crawler:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.crawler
+    env_file: ../../.env
+    depends_on:
+      - redis
+      - redpanda
+
+  indexer:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.indexer
+    env_file: ../../.env
+    depends_on:
+      - opensearch
+      - qdrant
+      - redpanda

@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+
+COPY apps/ apps/
+COPY libs/ libs/
+COPY services/ services/
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Command to run the Crawler worker
+CMD ["python", "apps/crawler/engine.py"]
