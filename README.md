@@ -70,5 +70,5 @@ make up
 - **Queue/Frontier**: Redis
 - **Stream Processing**: Kafka (Redpanda)
 
----
-Developed by the Atlas Intelligence Team.
+--
+
