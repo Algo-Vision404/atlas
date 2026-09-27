@@ -90,6 +90,19 @@ services:
     depends_on:
       - redis
       - redpanda
+      - opensearch
+      - qdrant
+
+  crawler-api:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.crawler
+    command: ["uvicorn", "apps.crawler.api:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    env_file: ../../.env
+    depends_on:
+      - redis
 
   indexer:
     build:
