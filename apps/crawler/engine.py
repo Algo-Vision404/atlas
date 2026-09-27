@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import logging
+import ipaddress
+import socket
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -84,20 +86,73 @@ class CrawlerEngine:
         self._robots_cache[origin] = (now + settings.ROBOTS_CACHE_TTL, parser)
         return parser.can_fetch(self.user_agent, url)
 
+    @staticmethod
+    async def is_safe_url(url: str) -> bool:
+        """Reject loopback, private, link-local, multicast, and reserved destinations."""
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        try:
+            ip = ipaddress.ip_address(hostname)
+            return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved)
+        except ValueError:
+            pass
+
+        if hostname.lower() in {"localhost", "localhost.localdomain"} or hostname.lower().endswith(".localhost"):
+            return False
+
+        try:
+            infos = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: socket.getaddrinfo(
+                    hostname,
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                ),
+            )
+        except (OSError, ValueError):
+            return False
+
+        for info in infos:
+            try:
+                ip = ipaddress.ip_address(info[4][0])
+            except ValueError:
+                return False
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+                return False
+        return True
+
     async def fetch(self, url: str) -> Optional[str]:
-        host = urlparse(url).netloc.lower()
+        parsed = urlparse(url)
+        host = parsed.hostname or parsed.netloc.lower()
+        if not await self.is_safe_url(url):
+            await self.frontier.mark_skipped(url, "destination is not a public internet address")
+            return None
+
         async with self._host_semaphores[host]:
             try:
                 async with self.session.get(url, allow_redirects=True) as response:
+                    final_url = str(response.url)
+                    if not await self.is_safe_url(final_url):
+                        await self.frontier.mark_skipped(url, "redirected to a non-public destination")
+                        return None
+
                     content_type = response.headers.get("Content-Type", "").lower()
                     if response.status != 200 or "text/html" not in content_type:
                         await self.frontier.mark_failed(url, f"HTTP {response.status}; content-type={content_type}")
                         return None
 
-                    body = await response.read()
-                    if len(body) > settings.MAX_RESPONSE_BYTES:
-                        await self.frontier.mark_failed(url, "response exceeds configured size limit")
-                        return None
+                    chunks = []
+                    total = 0
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if total > settings.MAX_RESPONSE_BYTES:
+                            await self.frontier.mark_failed(url, "response exceeds configured size limit")
+                            return None
+                        chunks.append(chunk)
+
+                    body = b"".join(chunks)
                     return body.decode(response.charset or "utf-8", errors="replace")
             except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError) as exc:
                 logger.warning("Fetch failed for %s: %s", url, exc)
@@ -127,10 +182,13 @@ class CrawlerEngine:
         if job and (depth > job.max_depth or (job.max_pages is not None and await self.jobs.pages(job.job_id) >= job.max_pages)):
             await self.frontier.mark_skipped(url, "crawl job limit reached")
             return False
-        if job and job.domain_whitelist and urlparse(url).netloc.lower() not in {d.lower() for d in job.domain_whitelist}:
-            await self.frontier.mark_skipped(url, "domain outside crawl job whitelist")
-            return False
-        if job and any(urlparse(url).netloc.lower() == d.lower() or urlparse(url).netloc.lower().endswith("." + d.lower().lstrip(".")) for d in job.domain_blacklist):
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        if job and job.domain_whitelist:
+            allowed = {d.lower().strip().rstrip(".").lstrip(".") for d in job.domain_whitelist}
+            if not any(hostname == d or hostname.endswith("." + d) for d in allowed):
+                await self.frontier.mark_skipped(url, "domain outside crawl job whitelist")
+                return False
+        if job and any(hostname == d.lower().strip().rstrip(".").lstrip(".") or hostname.endswith("." + d.lower().strip().rstrip(".").lstrip(".")) for d in job.domain_blacklist):
             await self.frontier.mark_skipped(url, "domain blocked by crawl job blacklist")
             return False
         if not await self.allowed_by_robots(url):
@@ -174,7 +232,16 @@ class CrawlerEngine:
             return False
 
     async def run_forever(self):
+        last_recovery = 0.0
+        recovery_interval = max(5.0, settings.WORKER_LEASE_TTL / 2)
         while True:
+            now = asyncio.get_running_loop().time()
+            if now - last_recovery >= recovery_interval:
+                recovered = await self.frontier.recover_stale()
+                if recovered:
+                    logger.warning("Recovered %d stale crawler leases", recovered)
+                last_recovery = now
+
             processed = await self.process_next()
             if not processed:
                 await asyncio.sleep(1)
