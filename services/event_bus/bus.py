@@ -32,8 +32,12 @@ class EventBus:
     async def publish(self, topic: str, event: AtlasEvent) -> None:
         payload = event.model_dump(mode="json")
         producer = await asyncio.to_thread(self._ensure_producer)
-        await asyncio.to_thread(producer.send, topic, payload)
-        await asyncio.to_thread(producer.flush)
+        try:
+            await asyncio.to_thread(producer.send, topic, payload)
+            await asyncio.to_thread(producer.flush)
+        except Exception:
+            logger.exception("Failed to publish event to %s", topic)
+            raise
 
     async def close(self) -> None:
         if self._producer is not None:
