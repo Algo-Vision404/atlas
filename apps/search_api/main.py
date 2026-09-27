@@ -12,7 +12,7 @@ from services.embedding_engine.engine import EmbeddingEngine
 
 keyword_store = OpenSearchIndex()
 vector_store = QdrantIndex()
-embedding_engine = EmbeddingEngine()
+embedding_engine: Optional[EmbeddingEngine] = None
 
 class SearchResult(BaseModel):
     title: str
@@ -50,7 +50,9 @@ def reciprocal_rank_fusion(keyword_results: List[Dict], vector_results: List[Dic
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global embedding_engine
     await asyncio.gather(keyword_store.initialize(), vector_store.initialize())
+    embedding_engine = EmbeddingEngine()
     yield
     await asyncio.gather(keyword_store.close(), vector_store.close())
 
@@ -59,7 +61,7 @@ app = FastAPI(title="ATLAS Search API", version=settings.VERSION, lifespan=lifes
 @app.get("/search/hybrid", response_model=SearchResponse)
 async def search_hybrid(q: str = Query(min_length=2), limit: int = Query(default=10, ge=1, le=100)):
     start = time.perf_counter()
-    query_vector = embedding_engine.encode(q)
+    query_vector = await asyncio.to_thread(embedding_engine.encode, q)
     keyword_results, vector_results = await asyncio.gather(
         keyword_store.search(q, limit=min(100, limit * 3)),
         vector_store.search(query_vector, limit=min(100, limit * 3)),
