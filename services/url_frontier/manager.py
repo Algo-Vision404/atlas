@@ -161,5 +161,18 @@ class URLFrontier:
             recovered += 1
         return recovered
 
+    async def mark_skipped(self, url: str, reason: str):
+        """Permanently skip a URL without consuming retry budget."""
+        key = self._key(url)
+        await self.redis.srem(self.processing_key, url)
+        await self.redis.delete(f"{self.lease_prefix}{key}")
+        meta_json = await self.redis.get(f"{self.metadata_prefix}{key}")
+        if not meta_json:
+            return
+        meta = URLMetadata.model_validate_json(meta_json)
+        meta.status = CrawlStatus.SKIPPED
+        meta.error = reason[:2000]
+        await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
+
     async def close(self):
         await self.redis.aclose()
