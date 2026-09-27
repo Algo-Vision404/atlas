@@ -101,7 +101,7 @@ class QdrantIndex:
     async def search(self, vector: List[float], limit: int = 20) -> List[Dict[str, Any]]:
         if settings.MOCK_MODE:
             return []
-        hits = await self.client.search(collection_name=self.collection_name, query_vector=vector, limit=limit, with_payload=True)
+        hits = await self.client.query_points(collection_name=self.collection_name, query=vector, limit=limit, with_payload=True).points
         return [
             {"url": hit.payload.get("url"), "title": hit.payload.get("title") or hit.payload.get("url"),
              "snippet": (hit.payload.get("content") or "")[:300], "score": float(hit.score)}
