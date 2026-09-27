@@ -11,6 +11,7 @@ from apps.indexer.engine import IndexingService
 from libs.core.config import settings
 from libs.schemas.models import Document
 from services.content_parser.parser import ContentParser
+from services.embedding_engine.engine import EmbeddingEngine
 from services.url_frontier.manager import URLFrontier
 
 logger = logging.getLogger("atlas.crawler")
@@ -26,6 +27,7 @@ class CrawlerEngine:
         self.session: Optional[aiohttp.ClientSession] = None
         self.semaphore = asyncio.Semaphore(concurrency)
         self.parser = ContentParser()
+        self.embedding_engine = EmbeddingEngine()
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -96,8 +98,7 @@ class CrawlerEngine:
                 images=extracted.images,
                 checksum=extracted.checksum,
             )
-            from services.embedding_engine.engine import EmbeddingEngine
-            document.embedding = EmbeddingEngine().encode(extracted.text[:12000])
+            document.embedding = self.embedding_engine.encode(extracted.text[:12000])
             await self.indexing.index_document(document)
 
             links = self.extract_links(html, url)
