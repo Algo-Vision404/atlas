@@ -11,6 +11,13 @@ class CrawlStatus(str, Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
 
+class CrawlJobStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
 class URLMetadata(BaseModel):
     url: str
     depth: int = 0
@@ -44,7 +51,7 @@ class CrawlJob(BaseModel):
     max_pages: Optional[int] = None
     domain_whitelist: List[str] = Field(default_factory=list)
     domain_blacklist: List[str] = Field(default_factory=list)
-    status: str = "running"
+    status: CrawlJobStatus = CrawlJobStatus.QUEUED
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
