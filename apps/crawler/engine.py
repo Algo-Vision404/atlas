@@ -3,6 +3,7 @@ import hashlib
 import logging
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse, urldefrag
+from urllib import robotparser
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -28,6 +29,7 @@ class CrawlerEngine:
         self.semaphore = asyncio.Semaphore(concurrency)
         self.parser = ContentParser()
         self.embedding_engine = EmbeddingEngine()
+        self._robots_cache = {}
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -43,6 +45,39 @@ class CrawlerEngine:
         await self.indexing.keyword_index.close()
         await self.indexing.vector_index.close()
         await self.frontier.close()
+
+    async def allowed_by_robots(self, url: str) -> bool:
+        """Check robots.txt and cache policies per origin."""
+        if not settings.RESPECT_ROBOTS_TXT:
+            return True
+        parsed = urlparse(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        cached = self._robots_cache.get(origin)
+        now = asyncio.get_running_loop().time()
+        if cached and cached[0] > now:
+            return cached[1].can_fetch(self.user_agent, url)
+
+        robots_url = f"{origin}/robots.txt"
+        parser = robotparser.RobotFileParser()
+        parser.set_url(robots_url)
+        try:
+            async with self.session.get(robots_url, allow_redirects=True) as response:
+                if response.status == 404:
+                    parser.parse([])
+                elif response.status != 200:
+                    logger.warning("robots.txt returned HTTP %s for %s", response.status, origin)
+                    return False
+                else:
+                    body = await response.read()
+                    if len(body) > 1_000_000:
+                        logger.warning("robots.txt too large for %s", origin)
+                        return False
+                    parser.parse(body.decode(response.charset or "utf-8", errors="replace").splitlines())
+        except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError) as exc:
+            logger.warning("robots.txt fetch failed for %s: %s", origin, exc)
+            return False
+        self._robots_cache[origin] = (now + settings.ROBOTS_CACHE_TTL, parser)
+        return parser.can_fetch(self.user_agent, url)
 
     async def fetch(self, url: str) -> Optional[str]:
         async with self.semaphore:
@@ -81,6 +116,9 @@ class CrawlerEngine:
             return False
 
         url, depth = result
+        if not await self.allowed_by_robots(url):
+            await self.frontier.mark_failed(url, "blocked by robots.txt or robots policy unavailable")
+            return False
         html = await self.fetch(url)
         if not html:
             return False
@@ -102,7 +140,7 @@ class CrawlerEngine:
             await self.indexing.index_document(document)
 
             links = self.extract_links(html, url)
-            if depth < 3:
+            if depth < settings.MAX_CRAWL_DEPTH:
                 await self.frontier.add_urls(links, depth=depth + 1)
             await self.frontier.mark_completed(url)
             return True
