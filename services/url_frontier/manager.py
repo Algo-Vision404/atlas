@@ -1,76 +1,128 @@
-import asyncio
+import hashlib
+import logging
+import time
+from datetime import datetime, timezone
+from typing import List, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
+
 try:
     import redis.asyncio as redis
 except ImportError:
     redis = None
 
-from typing import Set, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
-import time
-import json
-import logging
 from libs.core.config import settings
 from libs.schemas.models import URLMetadata, CrawlStatus
 
 logger = logging.getLogger("atlas.frontier")
 
 class URLFrontier:
+    """Redis-backed URL frontier for distributed crawler workers."""
+
     def __init__(self, redis_url: str = settings.REDIS_URL):
-        if redis:
-            self.redis = redis.from_url(redis_url, decode_responses=True)
-        else:
-            self.redis = None
+        if redis is None:
+            raise RuntimeError("redis package is required for the URL frontier")
+        self.redis = redis.from_url(redis_url, decode_responses=True)
         self.queue_key = "atlas:frontier:queue"
-        self.processing_key = "atlas:frontier:processing"
+        self.seen_key = "atlas:frontier:seen"
         self.completed_key = "atlas:frontier:completed"
+        self.processing_key = "atlas:frontier:processing"
         self.metadata_prefix = "atlas:url:"
         self.politeness_prefix = "atlas:politeness:"
 
-    async def add_urls(self, urls: List[str], depth: int = 0, priority: float = 1.0):
-        """Add new URLs to the frontier with metadata"""
+    @staticmethod
+    def normalize_url(url: str) -> Optional[str]:
+        try:
+            parsed = urlparse(url.strip())
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return None
+            normalized = urlunparse(parsed._replace(fragment=""))
+            if normalized.endswith("/") and parsed.path in {"", "/"}:
+                normalized = normalized.rstrip("/")
+            return normalized
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _key(url: str) -> str:
+        return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+    async def add_urls(self, urls: List[str], depth: int = 0, priority: float = 1.0) -> int:
         if settings.MOCK_MODE:
-            logger.info(f"MOCK Frontier: Added {len(urls)} URLs")
-            return
-            
-        for url in urls:
-            # ... real logic ...
-            pass
+            logger.info("MOCK Frontier: would add %d URLs", len(urls))
+            return len(urls)
+
+        added = 0
+        for raw_url in urls:
+            url = self.normalize_url(raw_url)
+            if not url:
+                continue
+            key = self._key(url)
+            if await self.redis.sadd(self.seen_key, key):
+                meta = URLMetadata(url=url, depth=depth, priority=priority, status=CrawlStatus.QUEUED)
+                await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
+                await self.redis.zadd(self.queue_key, {url: priority})
+                added += 1
+        return added
 
     async def get_next_url(self) -> Optional[Tuple[str, int]]:
-        """Get the highest priority URL that satisfies politeness constraints"""
         if settings.MOCK_MODE:
             return "https://example.com/simulated-url", 1
-            
-        # ... real logic ...
-        return None
+
+        candidates = await self.redis.zpopmax(self.queue_key, count=1)
+        if not candidates:
+            return None
+
+        url, score = candidates[0]
+        host = urlparse(url).netloc.lower()
+        now = time.time()
+        next_allowed = await self.redis.get(f"{self.politeness_prefix}{host}")
+        if next_allowed and float(next_allowed) > now:
+            await self.redis.zadd(self.queue_key, {url: float(score)})
+            return None
+
+        key = self._key(url)
+        meta_json = await self.redis.get(f"{self.metadata_prefix}{key}")
+        if not meta_json:
+            return None
+
+        meta = URLMetadata.model_validate_json(meta_json)
+        meta.status = CrawlStatus.CRAWLING
+        await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
+        await self.redis.sadd(self.processing_key, url)
+        await self.redis.set(
+            f"{self.politeness_prefix}{host}",
+            str(now + max(0.1, settings.POLITENESS_DELAY)),
+            ex=max(1, int(settings.POLITENESS_DELAY) + 1),
+        )
+        return url, meta.depth
 
     async def mark_completed(self, url: str):
-        """Mark a URL as successfully crawled"""
+        key = self._key(url)
         await self.redis.srem(self.processing_key, url)
-        await self.redis.sadd(self.completed_key, url)
-        
-        # Update status in metadata
-        meta_json = await self.redis.get(f"{self.metadata_prefix}{url}")
+        await self.redis.sadd(self.completed_key, key)
+        meta_json = await self.redis.get(f"{self.metadata_prefix}{key}")
         if meta_json:
-            meta = URLMetadata.parse_raw(meta_json)
+            meta = URLMetadata.model_validate_json(meta_json)
             meta.status = CrawlStatus.COMPLETED
-            meta.last_crawled_at = time.time() # Simplified timestamp
-            await self.redis.set(f"{self.metadata_prefix}{url}", meta.json())
+            meta.last_crawled_at = datetime.now(timezone.utc)
+            await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
 
     async def mark_failed(self, url: str, error: str):
-        """Mark a URL as failed and potentially re-queue"""
+        key = self._key(url)
         await self.redis.srem(self.processing_key, url)
-        
-        meta_json = await self.redis.get(f"{self.metadata_prefix}{url}")
-        if meta_json:
-            meta = URLMetadata.parse_raw(meta_json)
+        meta_json = await self.redis.get(f"{self.metadata_prefix}{key}")
+        if not meta_json:
+            return
+
+        meta = URLMetadata.model_validate_json(meta_json)
+        meta.error = error[:2000]
+        meta.retry_count += 1
+        if meta.retry_count < settings.MAX_RETRIES:
+            meta.status = CrawlStatus.QUEUED
+            await self.redis.zadd(self.queue_key, {url: max(0.01, meta.priority * (0.5 ** meta.retry_count))})
+        else:
             meta.status = CrawlStatus.FAILED
-            meta.error = error
-            meta.retry_count += 1
-            
-            if meta.retry_count < 3:
-                # Re-queue with lower priority
-                await self.redis.zadd(self.queue_key, {url: meta.priority * 0.5})
-                meta.status = CrawlStatus.QUEUED
-            
-            await self.redis.set(f"{self.metadata_prefix}{url}", meta.json())
+        await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
+
+    async def close(self):
+        await self.redis.aclose()
