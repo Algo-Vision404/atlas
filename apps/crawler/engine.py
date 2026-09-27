@@ -179,6 +179,10 @@ class CrawlerEngine:
         url, depth = result
         metadata = await self.frontier.get_metadata(url)
         job = await self.jobs.get(metadata.job_id) if metadata and metadata.job_id else None
+        if job and job.status == CrawlJobStatus.QUEUED:
+            job.status = CrawlJobStatus.RUNNING
+            job.updated_at = datetime.now(timezone.utc)
+            await self.jobs.update(job)
         if job and (depth > job.max_depth or (job.max_pages is not None and await self.jobs.pages(job.job_id) >= job.max_pages)):
             await self.frontier.mark_skipped(url, "crawl job limit reached")
             return False
