@@ -19,3 +19,9 @@ def test_rrf_merges_results_from_both_retrievers():
 )
 def test_url_normalization(raw, expected):
     assert URLFrontier.normalize_url(raw) == expected
+
+def test_url_metadata_supports_job_id():
+    from libs.schemas.models import URLMetadata
+
+    metadata = URLMetadata(url="https://example.com", job_id="job-123")
+    assert metadata.job_id == "job-123"
