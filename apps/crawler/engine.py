@@ -199,6 +199,7 @@ class CrawlerEngine:
             return False
 
         try:
+            await self.frontier.refresh_lease(url)
             extracted = self.parser.parse(html, url)
             document = Document(
                 id=hashlib.sha256(url.encode("utf-8")).hexdigest(),
@@ -213,6 +214,7 @@ class CrawlerEngine:
             )
             document.embedding = self.embedding_engine.encode(extracted.text[:12000])
             await self.indexing.index_document(document)
+            await self.frontier.refresh_lease(url)
 
             links = self.extract_links(html, url)
             if depth < settings.MAX_CRAWL_DEPTH:
