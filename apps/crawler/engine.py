@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+from collections import defaultdict
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse, urldefrag
 from urllib import robotparser
@@ -26,7 +27,7 @@ class CrawlerEngine:
         self.concurrency = concurrency
         self.user_agent = user_agent
         self.session: Optional[aiohttp.ClientSession] = None
-        self.semaphore = asyncio.Semaphore(concurrency)
+        self._host_semaphores = defaultdict(lambda: asyncio.Semaphore(concurrency))
         self.parser = ContentParser()
         self.embedding_engine = EmbeddingEngine()
         self._robots_cache = {}
@@ -80,7 +81,8 @@ class CrawlerEngine:
         return parser.can_fetch(self.user_agent, url)
 
     async def fetch(self, url: str) -> Optional[str]:
-        async with self.semaphore:
+        host = urlparse(url).netloc.lower()
+        async with self._host_semaphores[host]:
             try:
                 async with self.session.get(url, allow_redirects=True) as response:
                     content_type = response.headers.get("Content-Type", "").lower()
