@@ -117,7 +117,7 @@ class CrawlerEngine:
 
         url, depth = result
         if not await self.allowed_by_robots(url):
-            await self.frontier.mark_failed(url, "blocked by robots.txt or robots policy unavailable")
+            await self.frontier.mark_skipped(url, "blocked by robots.txt or robots policy unavailable")
             return False
         html = await self.fetch(url)
         if not html:
