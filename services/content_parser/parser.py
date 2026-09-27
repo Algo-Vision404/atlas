@@ -3,6 +3,7 @@ from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
 import hashlib
+from urllib.parse import urljoin, urldefrag
 
 @dataclass
 class ExtractedContent:
@@ -44,11 +45,15 @@ class ContentParser:
         text = main_content.get_text(separator='\n', strip=True)
         
         # 5. Link & Image Discovery
-        links = [a.get('href') for a in soup.find_all('a', href=True)]
-        images = [img.get('src') for img in soup.find_all('img', src=True)]
+        links = []
+        for anchor in soup.find_all("a", href=True):
+            absolute, _ = urldefrag(urljoin(url, anchor["href"]))
+            if absolute.startswith(("http://", "https://")):
+                links.append(absolute)
+        images = [urljoin(url, img.get("src")) for img in soup.find_all("img", src=True)]
         
-        # 6. Checksum for deduplication
-        checksum = hashlib.md5(text.encode('utf-8')).hexdigest()
+        # 6. SHA-256 checksum for deterministic content deduplication
+        checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
         
         return ExtractedContent(
             title=title.strip(),
