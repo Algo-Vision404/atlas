@@ -102,6 +102,11 @@ class URLFrontier:
         )
         return url, meta.depth
 
+    async def get_metadata(self, url: str) -> Optional[URLMetadata]:
+        key = self._key(url)
+        raw = await self.redis.get(f"{self.metadata_prefix}{key}")
+        return URLMetadata.model_validate_json(raw) if raw else None
+
     async def mark_completed(self, url: str):
         key = self._key(url)
         await self.redis.srem(self.processing_key, url)
