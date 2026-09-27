@@ -107,6 +107,15 @@ class URLFrontier:
         raw = await self.redis.get(f"{self.metadata_prefix}{key}")
         return URLMetadata.model_validate_json(raw) if raw else None
 
+    async def refresh_lease(self, url: str) -> bool:
+        """Extend the worker lease while a URL is still being processed."""
+        key = self._key(url)
+        lease_key = f"{self.lease_prefix}{key}"
+        if not await self.redis.exists(lease_key):
+            return False
+        await self.redis.expire(lease_key, max(1, settings.WORKER_LEASE_TTL))
+        return True
+
     async def mark_completed(self, url: str):
         key = self._key(url)
         await self.redis.srem(self.processing_key, url)
