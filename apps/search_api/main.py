@@ -1,17 +1,15 @@
-from fastapi import FastAPI, Query, HTTPException
-from typing import List, Optional, Dict
-from pydantic import BaseModel
-import uvicorn
-import time
 import asyncio
-from libs.core.config import settings
+import time
+from contextlib import asynccontextmanager
+from typing import Dict, List, Optional
+
+from fastapi import FastAPI, Query
+from pydantic import BaseModel
+
 from apps.indexer.engine import OpenSearchIndex, QdrantIndex
+from libs.core.config import settings
 from services.embedding_engine.engine import EmbeddingEngine
 
-app = FastAPI(title="ATLAS Search API", version="0.1.0")
-
-# Initialize backend connections
-# In a real app, these would be managed via lifespan events
 keyword_store = OpenSearchIndex()
 vector_store = QdrantIndex()
 embedding_engine = EmbeddingEngine()
@@ -22,7 +20,7 @@ class SearchResult(BaseModel):
     snippet: Optional[str] = None
     score: float
     rank: int
-    source: str # 'keyword', 'vector', or 'hybrid'
+    source: str
 
 class SearchResponse(BaseModel):
     query: str
@@ -30,75 +28,60 @@ class SearchResponse(BaseModel):
     took_ms: float
     results: List[SearchResult]
 
-def reciprocal_rank_fusion(
-    keyword_results: List[Dict], 
-    vector_results: List[Dict], 
-    k: int = 60
-) -> List[Dict]:
-    """Combine results from two different search methods using RRF"""
-    scores = {} # url -> score
-    
-    # Keyword results
-    for rank, res in enumerate(keyword_results):
-        url = res['url']
-        scores[url] = scores.get(url, 0) + 1 / (k + rank + 1)
-        
-    # Vector results
-    for rank, res in enumerate(vector_results):
-        url = res['url']
-        scores[url] = scores.get(url, 0) + 1 / (k + rank + 1)
-        
-    # Sort and re-format
-    combined = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    
-    # Merge original metadata (simplified)
-    # In a real system, we'd pull the full document metadata for the top N
-    final_results = []
-    for i, (url, score) in enumerate(combined):
-        final_results.append({
-            "url": url,
-            "score": score,
-            "rank": i + 1,
-            "title": "Merged Result", # Simplified
-            "source": "hybrid"
-        })
-    return final_results
+def reciprocal_rank_fusion(keyword_results: List[Dict], vector_results: List[Dict], k: int = 60) -> List[Dict]:
+    merged: Dict[str, Dict] = {}
+    for source, results in (("keyword", keyword_results), ("vector", vector_results)):
+        for rank, result in enumerate(results):
+            url = result["url"]
+            entry = merged.setdefault(url, {**result, "score": 0.0, "sources": set()})
+            entry["score"] += 1.0 / (k + rank + 1)
+            entry["sources"].add(source)
+            if not entry.get("title") and result.get("title"):
+                entry["title"] = result["title"]
 
-@app.get("/search/hybrid")
-async def search_hybrid(q: str, limit: int = 10) -> SearchResponse:
-    """Combined keyword and semantic search with RRF ranking"""
-    start_time = time.time()
-    
-    # 1. Get embedding for query
+    ranked = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
+    output = []
+    for rank, result in enumerate(ranked, 1):
+        result["rank"] = rank
+        result["source"] = "hybrid" if len(result["sources"]) > 1 else next(iter(result["sources"]))
+        result.pop("sources", None)
+        output.append(result)
+    return output
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await asyncio.gather(keyword_store.initialize(), vector_store.initialize())
+    yield
+    await asyncio.gather(keyword_store.close(), vector_store.close())
+
+app = FastAPI(title="ATLAS Search API", version=settings.VERSION, lifespan=lifespan)
+
+@app.get("/search/hybrid", response_model=SearchResponse)
+async def search_hybrid(q: str = Query(min_length=2), limit: int = Query(default=10, ge=1, le=100)):
+    start = time.perf_counter()
     query_vector = embedding_engine.encode(q)
-    
-    # 2. Parallel Search
-    # Note: OpenSearch and Qdrant search methods need to be implemented in apps.indexer.engine
-    # For now, we'll assume they return lists of dicts with 'url' and metadata
-    
-    # Mocking the call to unimplemented search methods for logic flow
-    # keyword_task = keyword_store.search(q, limit=limit*2)
-    # vector_task = vector_store.search(query_vector, limit=limit*2)
-    # k_results, v_results = await asyncio.gather(keyword_task, vector_task)
-    
-    k_results = [] # Placeholder
-    v_results = [] # Placeholder
-    
-    # 3. Perform Fusion
-    fused_results = reciprocal_rank_fusion(k_results, v_results)
-    
-    took_ms = (time.time() - start_time) * 1000
-    
+    keyword_results, vector_results = await asyncio.gather(
+        keyword_store.search(q, limit=min(100, limit * 3)),
+        vector_store.search(query_vector, limit=min(100, limit * 3)),
+    )
+    fused = reciprocal_rank_fusion(keyword_results, vector_results)
     return SearchResponse(
         query=q,
-        total_results=len(fused_results),
-        took_ms=round(took_ms, 2),
-        results=[SearchResult(**res) for res in fused_results[:limit]]
+        total_results=len(fused),
+        took_ms=round((time.perf_counter() - start) * 1000, 2),
+        results=[SearchResult(**item) for item in fused[:limit]],
+    )
+
+@app.get("/search/keyword", response_model=SearchResponse)
+async def search_keyword(q: str = Query(min_length=2), limit: int = Query(default=10, ge=1, le=100)):
+    start = time.perf_counter()
+    results = await keyword_store.search(q, limit)
+    return SearchResponse(
+        query=q, total_results=len(results),
+        took_ms=round((time.perf_counter() - start) * 1000, 2),
+        results=[SearchResult(**{**r, "rank": i + 1, "source": "keyword"}) for i, r in enumerate(results)],
     )
 
 @app.get("/health")
 async def health():
-    return {"status": "online", "version": "0.1.0"}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    return {"status": "ok", "version": settings.VERSION, "mock_mode": settings.MOCK_MODE}
