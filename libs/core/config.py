@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     POLITENESS_DELAY: float = 0.5
     MAX_RETRIES: int = 3
     MAX_RESPONSE_BYTES: int = 10_000_000
+    MAX_CRAWL_DEPTH: int = 3
+    RESPECT_ROBOTS_TXT: bool = True
+    ROBOTS_CACHE_TTL: int = 3600
+    WORKER_LEASE_TTL: int = 120
 
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     OPENAI_API_KEY: Optional[str] = None
