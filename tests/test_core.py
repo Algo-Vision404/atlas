@@ -38,3 +38,25 @@ async def test_private_destinations_are_rejected():
 
     assert await CrawlerEngine.is_safe_url("http://127.0.0.1:8000") is False
     assert await CrawlerEngine.is_safe_url("http://localhost:8000") is False
+
+def test_extraction_event_round_trips_document():
+    from libs.schemas.models import AtlasEvent, Document, EventType
+
+    document = Document(
+        id="doc-1",
+        url="https://example.com",
+        title="Example",
+        content="<html></html>",
+        text_clean="Example",
+        checksum="abc",
+    )
+    event = AtlasEvent(
+        event_id="evt-1",
+        type=EventType.EXTRACTION_COMPLETED,
+        payload={"document": document.model_dump(mode="json")},
+        source="crawler",
+    )
+
+    restored = Document.model_validate(event.payload["document"])
+    assert restored.id == document.id
+    assert restored.url == document.url
