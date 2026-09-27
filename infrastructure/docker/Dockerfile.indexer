@@ -20,4 +20,4 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
 # Command to run the Indexer service
-CMD ["python", "apps/indexer/engine.py"]
+CMD ["python", "apps/indexer/worker.py"]
