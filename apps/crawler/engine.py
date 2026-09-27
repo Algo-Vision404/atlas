@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse, urldefrag
 from urllib import robotparser
@@ -164,7 +165,7 @@ class CrawlerEngine:
                 job = await self.jobs.get(metadata.job_id)
                 if job and job.max_pages is not None and count >= job.max_pages:
                     job.status = "completed"
-                    job.updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+                    job.updated_at = datetime.now(timezone.utc)
                     await self.jobs.update(job)
             return True
         except Exception as exc:
