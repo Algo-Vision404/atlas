@@ -48,7 +48,7 @@ class OpenSearchIndex:
     async def index(self, doc: Document):
         if settings.MOCK_MODE:
             return
-        await self.client.index(index=self.index_name, id=doc.id, body=doc.model_dump(exclude={"embedding"}), refresh=False)
+        await self.client.index(index=self.index_name, id=doc.id, body=doc.model_dump(mode="json", exclude={"embedding"}), refresh=False)
 
     async def search(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
         if settings.MOCK_MODE:
@@ -59,7 +59,7 @@ class OpenSearchIndex:
         )
         return [
             {"url": hit["_source"]["url"], "title": hit["_source"].get("title") or hit["_source"]["url"],
-             "snippet": " ".join(hit["_source"].get("text_clean") or hit["_source"].get("content", "")).strip()[:300],
+             "snippet": (hit["_source"].get("text_clean") or hit["_source"].get("content", "")).strip()[:300],
              "score": float(hit.get("_score") or 0)}
             for hit in response["hits"]["hits"]
         ]
