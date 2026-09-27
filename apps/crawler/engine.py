@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 
 from apps.indexer.engine import IndexingService
 from libs.core.config import settings
-from libs.schemas.models import Document
+from libs.schemas.models import CrawlJobStatus, Document
 from services.content_parser.parser import ContentParser
 from services.crawl_jobs.store import CrawlJobStore
 from services.embedding_engine.engine import EmbeddingEngine
@@ -224,7 +224,7 @@ class CrawlerEngine:
                 count = await self.jobs.increment_pages(metadata.job_id)
                 job = await self.jobs.get(metadata.job_id)
                 if job and job.max_pages is not None and count >= job.max_pages:
-                    job.status = "completed"
+                    job.status = CrawlJobStatus.COMPLETED
                     job.updated_at = datetime.now(timezone.utc)
                     await self.jobs.update(job)
             return True
