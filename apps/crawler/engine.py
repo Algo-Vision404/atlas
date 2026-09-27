@@ -12,7 +12,6 @@ from urllib import robotparser
 import aiohttp
 from bs4 import BeautifulSoup
 
-from apps.indexer.engine import IndexingService
 from libs.core.config import settings
 from libs.schemas.models import AtlasEvent, CrawlJobStatus, Document, EventType
 from services.content_parser.parser import ContentParser
@@ -25,11 +24,10 @@ from services.url_frontier.manager import URLFrontier
 logger = logging.getLogger("atlas.crawler")
 
 class CrawlerEngine:
-    def __init__(self, frontier: URLFrontier, indexing: Optional[IndexingService] = None,
+    def __init__(self, frontier: URLFrontier,
                  concurrency: int = settings.CONCURRENT_REQUESTS_PER_DOMAIN,
                  user_agent: str = settings.DEFAULT_USER_AGENT):
         self.frontier = frontier
-        self.indexing = indexing or IndexingService()
         self.concurrency = concurrency
         self.user_agent = user_agent
         self.session: Optional[aiohttp.ClientSession] = None
@@ -45,14 +43,11 @@ class CrawlerEngine:
             headers={"User-Agent": self.user_agent, "Accept": "text/html,application/xhtml+xml"},
             timeout=aiohttp.ClientTimeout(total=settings.REQUEST_TIMEOUT),
         )
-        await self.indexing.initialize()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         if self.session:
             await self.session.close()
-        await self.indexing.keyword_index.close()
-        await self.indexing.vector_index.close()
         await self.frontier.close()
         await self.jobs.close()
         await self.event_bus.close()
@@ -221,17 +216,20 @@ class CrawlerEngine:
                 checksum=extracted.checksum,
             )
             document.embedding = self.embedding_engine.encode(extracted.text[:12000])
-            await self.indexing.index_document(document)
             await self.frontier.refresh_lease(url)
 
             links = self.extract_links(html, url)
             if depth < settings.MAX_CRAWL_DEPTH:
                 await self.frontier.add_urls(links, depth=depth + 1, job_id=metadata.job_id if metadata else None)
             try:
-                await self.event_bus.publish(EventTopic.PAGE_CRAWLED.value, AtlasEvent(
-                    event_id=hashlib.sha256(f"page:{url}".encode()).hexdigest(),
-                    type=EventType.PAGE_CRAWLED,
-                    payload={"url": url, "depth": depth, "job_id": metadata.job_id if metadata else None},
+                await self.event_bus.publish(EventTopic.EXTRACTION_COMPLETED.value, AtlasEvent(
+                    event_id=hashlib.sha256(f"extraction:{url}:{extracted.checksum}".encode()).hexdigest(),
+                    type=EventType.EXTRACTION_COMPLETED,
+                    payload={
+                        "document": document.model_dump(mode="json"),
+                        "depth": depth,
+                        "job_id": metadata.job_id if metadata else None,
+                    },
                     source="crawler",
                 ))
             except Exception:
