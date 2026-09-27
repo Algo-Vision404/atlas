@@ -13,6 +13,7 @@ from apps.indexer.engine import IndexingService
 from libs.core.config import settings
 from libs.schemas.models import Document
 from services.content_parser.parser import ContentParser
+from services.crawl_jobs.store import CrawlJobStore
 from services.embedding_engine.engine import EmbeddingEngine
 from services.url_frontier.manager import URLFrontier
 
@@ -31,6 +32,7 @@ class CrawlerEngine:
         self.parser = ContentParser()
         self.embedding_engine = EmbeddingEngine()
         self._robots_cache = {}
+        self.jobs = CrawlJobStore()
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -46,6 +48,7 @@ class CrawlerEngine:
         await self.indexing.keyword_index.close()
         await self.indexing.vector_index.close()
         await self.frontier.close()
+        await self.jobs.close()
 
     async def allowed_by_robots(self, url: str) -> bool:
         """Check robots.txt and cache policies per origin."""
@@ -118,6 +121,17 @@ class CrawlerEngine:
             return False
 
         url, depth = result
+        metadata = await self.frontier.get_metadata(url)
+        job = await self.jobs.get(metadata.job_id) if metadata and metadata.job_id else None
+        if job and (depth > job.max_depth or (job.max_pages is not None and await self.jobs.pages(job.job_id) >= job.max_pages)):
+            await self.frontier.mark_skipped(url, "crawl job limit reached")
+            return False
+        if job and job.domain_whitelist and urlparse(url).netloc.lower() not in {d.lower() for d in job.domain_whitelist}:
+            await self.frontier.mark_skipped(url, "domain outside crawl job whitelist")
+            return False
+        if job and any(urlparse(url).netloc.lower() == d.lower() or urlparse(url).netloc.lower().endswith("." + d.lower().lstrip(".")) for d in job.domain_blacklist):
+            await self.frontier.mark_skipped(url, "domain blocked by crawl job blacklist")
+            return False
         if not await self.allowed_by_robots(url):
             await self.frontier.mark_skipped(url, "blocked by robots.txt or robots policy unavailable")
             return False
@@ -143,8 +157,15 @@ class CrawlerEngine:
 
             links = self.extract_links(html, url)
             if depth < settings.MAX_CRAWL_DEPTH:
-                await self.frontier.add_urls(links, depth=depth + 1)
+                await self.frontier.add_urls(links, depth=depth + 1, job_id=metadata.job_id if metadata else None)
             await self.frontier.mark_completed(url)
+            if metadata and metadata.job_id:
+                count = await self.jobs.increment_pages(metadata.job_id)
+                job = await self.jobs.get(metadata.job_id)
+                if job and job.max_pages is not None and count >= job.max_pages:
+                    job.status = "completed"
+                    job.updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+                    await self.jobs.update(job)
             return True
         except Exception as exc:
             logger.exception("Processing failed for %s", url)
