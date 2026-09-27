@@ -90,8 +90,6 @@ services:
     depends_on:
       - redis
       - redpanda
-      - opensearch
-      - qdrant
 
   crawler-api:
     build:
