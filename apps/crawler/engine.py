@@ -14,9 +14,11 @@ from bs4 import BeautifulSoup
 
 from apps.indexer.engine import IndexingService
 from libs.core.config import settings
-from libs.schemas.models import CrawlJobStatus, Document
+from libs.schemas.models import AtlasEvent, CrawlJobStatus, Document, EventType
 from services.content_parser.parser import ContentParser
 from services.crawl_jobs.store import CrawlJobStore
+from services.event_bus.bus import EventBus
+from services.event_bus.topics import EventTopic
 from services.embedding_engine.engine import EmbeddingEngine
 from services.url_frontier.manager import URLFrontier
 
@@ -36,6 +38,7 @@ class CrawlerEngine:
         self.embedding_engine = EmbeddingEngine()
         self._robots_cache = {}
         self.jobs = CrawlJobStore()
+        self.event_bus = EventBus()
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -52,6 +55,7 @@ class CrawlerEngine:
         await self.indexing.vector_index.close()
         await self.frontier.close()
         await self.jobs.close()
+        await self.event_bus.close()
 
     async def allowed_by_robots(self, url: str) -> bool:
         """Check robots.txt and cache policies per origin."""
@@ -223,6 +227,12 @@ class CrawlerEngine:
             links = self.extract_links(html, url)
             if depth < settings.MAX_CRAWL_DEPTH:
                 await self.frontier.add_urls(links, depth=depth + 1, job_id=metadata.job_id if metadata else None)
+            await self.event_bus.publish(EventTopic.PAGE_CRAWLED.value, AtlasEvent(
+                event_id=hashlib.sha256(f"page:{url}".encode()).hexdigest(),
+                type=EventType.PAGE_CRAWLED,
+                payload={"url": url, "depth": depth, "job_id": metadata.job_id if metadata else None},
+                source="crawler",
+            ))
             await self.frontier.mark_completed(url)
             if metadata and metadata.job_id:
                 count = await self.jobs.increment_pages(metadata.job_id)
