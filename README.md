@@ -9,8 +9,10 @@ Seeds -> Redis URL Frontier -> Crawler Workers -> Content Parser -> Embedding En
 ## Current capabilities
 
 - Redis-backed URL deduplication and priority queue.
+- Per-host concurrency limits, politeness delays, and worker lease recovery.
 - Per-host politeness delay and bounded retries.
 - Async crawler with response-size and content-type limits.
+- robots.txt enforcement with cached host policies.
 - HTML parsing and document normalization.
 - Sentence-Transformer embeddings.
 - Real OpenSearch BM25 retrieval.
@@ -37,7 +39,7 @@ Start a crawler worker with: python apps/crawler/engine.py
 
 ## Operational boundaries
 
-ATLAS is not yet a complete internet-scale crawler. Kafka/Redpanda event streaming, robots.txt policy enforcement, crawl-job persistence, worker leases, observability, and graph indexing remain explicit next-stage work.
+ATLAS is not yet a complete internet-scale crawler. Kafka/Redpanda event streaming, crawl-job persistence, observability, and graph indexing remain explicit next-stage work.
 
 Do not deploy the default Docker credentials or unrestricted crawler configuration to production.
 
