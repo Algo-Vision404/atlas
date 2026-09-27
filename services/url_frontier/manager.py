@@ -47,7 +47,7 @@ class URLFrontier:
     def _key(url: str) -> str:
         return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
-    async def add_urls(self, urls: List[str], depth: int = 0, priority: float = 1.0) -> int:
+    async def add_urls(self, urls: List[str], depth: int = 0, priority: float = 1.0, job_id: Optional[str] = None) -> int:
         if settings.MOCK_MODE:
             logger.info("MOCK Frontier: would add %d URLs", len(urls))
             return len(urls)
@@ -59,7 +59,7 @@ class URLFrontier:
                 continue
             key = self._key(url)
             if await self.redis.sadd(self.seen_key, key):
-                meta = URLMetadata(url=url, depth=depth, priority=priority, status=CrawlStatus.QUEUED)
+                meta = URLMetadata(url=url, depth=depth, priority=priority, status=CrawlStatus.QUEUED, job_id=job_id)
                 await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
                 await self.redis.zadd(self.queue_key, {url: priority})
                 added += 1
