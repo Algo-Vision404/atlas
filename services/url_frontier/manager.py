@@ -28,6 +28,7 @@ class URLFrontier:
         self.processing_key = "atlas:frontier:processing"
         self.metadata_prefix = "atlas:url:"
         self.politeness_prefix = "atlas:politeness:"
+        self.lease_prefix = "atlas:lease:"
 
     @staticmethod
     def normalize_url(url: str) -> Optional[str]:
@@ -90,6 +91,11 @@ class URLFrontier:
         await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
         await self.redis.sadd(self.processing_key, url)
         await self.redis.set(
+            f"{self.lease_prefix}{key}",
+            str(now),
+            ex=max(1, settings.WORKER_LEASE_TTL),
+        )
+        await self.redis.set(
             f"{self.politeness_prefix}{host}",
             str(now + max(0.1, settings.POLITENESS_DELAY)),
             ex=max(1, int(settings.POLITENESS_DELAY) + 1),
@@ -99,6 +105,7 @@ class URLFrontier:
     async def mark_completed(self, url: str):
         key = self._key(url)
         await self.redis.srem(self.processing_key, url)
+        await self.redis.delete(f"{self.lease_prefix}{key}")
         await self.redis.sadd(self.completed_key, key)
         meta_json = await self.redis.get(f"{self.metadata_prefix}{key}")
         if meta_json:
@@ -110,6 +117,7 @@ class URLFrontier:
     async def mark_failed(self, url: str, error: str):
         key = self._key(url)
         await self.redis.srem(self.processing_key, url)
+        await self.redis.delete(f"{self.lease_prefix}{key}")
         meta_json = await self.redis.get(f"{self.metadata_prefix}{key}")
         if not meta_json:
             return
@@ -123,6 +131,35 @@ class URLFrontier:
         else:
             meta.status = CrawlStatus.FAILED
         await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
+
+    async def recover_stale(self) -> int:
+        """Requeue URLs whose worker lease expired before completion."""
+        if settings.MOCK_MODE:
+            return 0
+        recovered = 0
+        urls = await self.redis.smembers(self.processing_key)
+        for url in urls:
+            key = self._key(url)
+            lease = await self.redis.get(f"{self.lease_prefix}{key}")
+            if lease is not None:
+                continue
+            meta_json = await self.redis.get(f"{self.metadata_prefix}{key}")
+            if not meta_json:
+                await self.redis.srem(self.processing_key, url)
+                continue
+            meta = URLMetadata.model_validate_json(meta_json)
+            meta.retry_count += 1
+            if meta.retry_count >= settings.MAX_RETRIES:
+                meta.status = CrawlStatus.FAILED
+                meta.error = "worker lease expired"
+            else:
+                meta.status = CrawlStatus.QUEUED
+                meta.error = "worker lease expired; requeued"
+                await self.redis.zadd(self.queue_key, {url: max(0.01, meta.priority * (0.5 ** meta.retry_count))})
+            await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
+            await self.redis.srem(self.processing_key, url)
+            recovered += 1
+        return recovered
 
     async def close(self):
         await self.redis.aclose()
