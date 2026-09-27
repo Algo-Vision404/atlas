@@ -4,7 +4,7 @@ ATLAS is a distributed web crawl, indexing, and hybrid-search engine. The 0.2 re
 
 ## Architecture
 
-Crawl API -> Redis Job Store + URL Frontier -> Crawler Workers -> Content Parser -> Embedding Engine -> OpenSearch + Qdrant -> Search API
+Crawl API -> Redis Job Store + URL Frontier -> Crawler Workers -> Content Parser + Embedding -> Redpanda -> Indexer Workers -> OpenSearch + Qdrant -> Search API
 
 Redpanda is provisioned as the event-bus layer for the next streaming stage, while Neo4j and ClickHouse are available for graph and analytics workloads.
 
@@ -21,6 +21,8 @@ Redpanda is provisioned as the event-bus layer for the next streaming stage, whi
 - Crawl depth and page-count limits.
 - HTML parsing and document normalization.
 - Sentence-Transformer embeddings.
+- Redpanda event boundary between extraction and indexing.
+- Consumer-group indexer with commit-after-success semantics.
 - Real OpenSearch BM25 retrieval.
 - Real Qdrant vector retrieval.
 - Reciprocal Rank Fusion for hybrid retrieval.
@@ -65,7 +67,7 @@ Inspect a crawl:
 
 ## Operational boundaries
 
-ATLAS is not yet an internet-scale search platform. The remaining major stages are event-driven indexing with Redpanda, production observability, graph extraction/indexing, stronger crawl scheduling, and deployment hardening.
+ATLAS is not yet an internet-scale search platform. The remaining major stages are production observability, graph extraction/indexing, stronger crawl scheduling, event replay/dead-letter handling, and deployment hardening.
 
 The crawler intentionally refuses non-public network destinations. This is a security boundary, not a guarantee against every possible DNS or redirect abuse case.
 
