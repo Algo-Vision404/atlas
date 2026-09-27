@@ -20,6 +20,7 @@ class URLMetadata(BaseModel):
     status: CrawlStatus = CrawlStatus.PENDING
     retry_count: int = 0
     error: Optional[str] = None
+    job_id: Optional[str] = None
 
 class Document(BaseModel):
     id: str
