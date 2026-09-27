@@ -221,19 +221,16 @@ class CrawlerEngine:
             links = self.extract_links(html, url)
             if depth < settings.MAX_CRAWL_DEPTH:
                 await self.frontier.add_urls(links, depth=depth + 1, job_id=metadata.job_id if metadata else None)
-            try:
-                await self.event_bus.publish(EventTopic.EXTRACTION_COMPLETED.value, AtlasEvent(
-                    event_id=hashlib.sha256(f"extraction:{url}:{extracted.checksum}".encode()).hexdigest(),
-                    type=EventType.EXTRACTION_COMPLETED,
-                    payload={
-                        "document": document.model_dump(mode="json"),
-                        "depth": depth,
-                        "job_id": metadata.job_id if metadata else None,
-                    },
-                    source="crawler",
-                ))
-            except Exception:
-                logger.exception("Event publication failed for %s; crawl result remains committed", url)
+            await self.event_bus.publish(EventTopic.EXTRACTION_COMPLETED.value, AtlasEvent(
+                event_id=hashlib.sha256(f"extraction:{url}:{extracted.checksum}".encode()).hexdigest(),
+                type=EventType.EXTRACTION_COMPLETED,
+                payload={
+                    "document": document.model_dump(mode="json"),
+                    "depth": depth,
+                    "job_id": metadata.job_id if metadata else None,
+                },
+                source="crawler",
+            ))
             await self.frontier.mark_completed(url)
             if metadata and metadata.job_id:
                 count = await self.jobs.increment_pages(metadata.job_id)
