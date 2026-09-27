@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 from enum import Enum
 
 class CrawlStatus(str, Enum):
@@ -15,14 +15,14 @@ class URLMetadata(BaseModel):
     url: str
     depth: int = 0
     priority: float = 1.0
-    discovered_at: datetime = Field(default_factory=datetime.utcnow)
+    discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_crawled_at: Optional[datetime] = None
     status: CrawlStatus = CrawlStatus.PENDING
     retry_count: int = 0
     error: Optional[str] = None
 
 class Document(BaseModel):
-    id: str  # Hash of URL
+    id: str
     url: str
     title: Optional[str] = None
     content: str
@@ -32,7 +32,7 @@ class Document(BaseModel):
     images: List[str] = Field(default_factory=list)
     language: Optional[str] = None
     mime_type: str = "text/html"
-    crawled_at: datetime = Field(default_factory=datetime.utcnow)
+    crawled_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     checksum: str
     embedding: Optional[List[float]] = None
 
@@ -44,8 +44,8 @@ class CrawlJob(BaseModel):
     domain_whitelist: List[str] = Field(default_factory=list)
     domain_blacklist: List[str] = Field(default_factory=list)
     status: str = "running"
-    started_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class EventType(str, Enum):
     URL_DISCOVERED = "url_discovered"
@@ -57,6 +57,6 @@ class EventType(str, Enum):
 class AtlasEvent(BaseModel):
     event_id: str
     type: EventType
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     payload: Dict[str, Any]
     source: str
