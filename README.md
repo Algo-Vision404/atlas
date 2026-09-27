@@ -1,74 +1,46 @@
-# ATLAS: Distributed Web Crawl & Indexing CLI Engine
+# ATLAS
 
-![ATLAS Banner](https://img.shields.io/badge/ATLAS-Web_Intelligence-blue?style=for-the-badge)
-![Version](https://img.shields.io/badge/version-0.1.0-green?style=for-the-badge)
-![Status](https://img.shields.io/badge/status-active-brightgreen?style=for-the-badge)
+ATLAS is a distributed web crawl, indexing, and hybrid-search engine. The 0.2 release focuses on making the core retrieval pipeline real rather than simulating infrastructure.
 
-**ATLAS** is a production-grade, distributed web intelligence engine designed for large-scale internet crawling, indexing, and semantic search. It provides a CLI-native experience for orchestrating complex information retrieval pipelines.
+## Architecture
 
-## Key Features
+Seeds -> Redis URL Frontier -> Crawler Workers -> Content Parser -> Embedding Engine -> OpenSearch + Qdrant -> Search API -> RRF Hybrid Search
 
-- **Distributed Architecture**: Multi-node crawling and indexing powered by a Redis-backed URL frontier.
-- **CLI-Native Control**: High-fidelity terminal interface with real-time telemetry and executive dashboards.
-- **Hybrid Search (RRF)**: Reciprocal Rank Fusion combining OpenSearch (Keyword) and Qdrant (Vector) for maximum precision.
-- **Simulation Mode**: Built-in mock mode allows full CLI and dashboard testing without active infrastructure.
-- **Containerized Stack**: Fully orchestrated multi-service environment via Docker and Makefile.
+## Current capabilities
 
-## System Architecture
+- Redis-backed URL deduplication and priority queue.
+- Per-host politeness delay and bounded retries.
+- Async crawler with response-size and content-type limits.
+- HTML parsing and document normalization.
+- Sentence-Transformer embeddings.
+- Real OpenSearch BM25 retrieval.
+- Real Qdrant vector retrieval.
+- Reciprocal Rank Fusion for hybrid retrieval.
+- FastAPI search and health endpoints.
+- Docker-based infrastructure for local deployment.
 
-```mermaid
-graph TD
-    CLI[ATLAS CLI] --> Frontier[Redis URL Frontier]
-    Frontier --> Crawler[Crawler Worker Fleet]
-    Crawler --> Events{Kafka Event Bus}
-    Events --> Indexer[Indexing Service]
-    Indexer --> Embedding[Sentence Transformers]
-    Embedding --> Qdrant[(Qdrant Vector DB)]
-    Indexer --> OpenSearch[(OpenSearch)]
-    SearchAPI[Search API] --> Qdrant
-    SearchAPI --> OpenSearch
-    CLI --> SearchAPI
-```
+## Run locally
 
-## Monorepo Structure
+Copy .env.example to .env, start infrastructure, then install ATLAS.
 
-- `apps/cli`: Cyber-minimalist terminal control layer.
-- `apps/crawler`: Distributed aiohttp worker engine.
-- `apps/indexer`: Hybrid indexing service (Keyword + Vector).
-- `apps/search_api`: FastAPI gateway with RRF ranking.
-- `services/url_frontier`: Redis-backed priority queue & politeness manager.
-- `services/embedding_engine`: Semantic vector generation (Sentence-Transformers).
-- `libs/core`: Pydantic-based configuration and system settings.
-- `infrastructure/docker`: Orchestration and containerization logic.
+docker compose -f infrastructure/docker/docker-compose.yml up -d redis opensearch qdrant
+pip install -e .
 
-## Quick Start
+Start the API with: python apps/search_api/main.py
 
-### 1. Configure Environment
-```bash
-cp .env.example .env
-```
+Endpoints:
+- GET /health
+- GET /search/keyword?q=distributed+systems
+- GET /search/hybrid?q=distributed+systems
 
-### 2. Run in Simulation Mode (No Infrastructure Required)
-If you don't have Docker or databases running, ATLAS automatically enters MOCK_MODE.
-```bash
-$env:PYTHONPATH="."; python apps/cli/main.py status
-$env:PYTHONPATH="."; python apps/cli/main.py crawl dash
-```
+Start a crawler worker with: python apps/crawler/engine.py
 
-### 3. Run Production Stack (Docker Required)
-```bash
-make build
-make up
-```
+## Operational boundaries
 
-## Tech Stack
+ATLAS is not yet a complete internet-scale crawler. Kafka/Redpanda event streaming, robots.txt policy enforcement, crawl-job persistence, worker leases, observability, and graph indexing remain explicit next-stage work.
 
-- **Core**: Python 3.11+, Typer, Rich, Pydantic V2
-- **Vector Search**: Qdrant
-- **Keyword Search**: OpenSearch
-- **Graph Engine**: Neo4j (In Development)
-- **Queue/Frontier**: Redis
-- **Stream Processing**: Kafka (Redpanda)
+Do not deploy the default Docker credentials or unrestricted crawler configuration to production.
 
---
+## Stack
 
+Python 3.11+, FastAPI, Typer, aiohttp, Redis, OpenSearch, Qdrant, Sentence Transformers, Redpanda/Kafka, Neo4j.
