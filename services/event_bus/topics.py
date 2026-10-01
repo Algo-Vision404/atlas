@@ -7,3 +7,4 @@ class EventTopic(str, Enum):
     EXTRACTION_COMPLETED = "atlas.extraction-completed"
     INDEXING_COMPLETED = "atlas.indexing-completed"
     CRAWL_FAILED = "atlas.crawl-failed"
+    DEAD_LETTER = "atlas.dead-letter"

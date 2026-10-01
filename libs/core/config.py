@@ -29,8 +29,17 @@ class Settings(BaseSettings):
     WORKER_LEASE_TTL: int = 120
 
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    EMBEDDING_DIMENSION: int = 384
     OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
+
+    MAX_REDIRECTS: int = 5
+    SEARCH_API_HOST: str = "0.0.0.0"
+    SEARCH_API_PORT: int = 8000
+    SEARCH_API_URL: str = "http://localhost:8000"
+    CRAWLER_API_HOST: str = "0.0.0.0"
+    CRAWLER_API_PORT: int = 8001
+    CRAWLER_API_URL: str = "http://localhost:8001"
 
     ATLAS_THEME: str = "cyberpunk"
     LOG_LEVEL: str = "INFO"

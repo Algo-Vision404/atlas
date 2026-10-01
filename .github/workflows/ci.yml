@@ -2,7 +2,7 @@ name: ATLAS CI
 
 on:
   push:
-    branches: ["main", "refine/**"]
+    branches: ["main", "refine/**", "arena/**"]
   pull_request:
     branches: ["main"]
 
