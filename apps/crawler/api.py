@@ -1,11 +1,14 @@
+import ipaddress
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from libs.core.config import settings
 from libs.schemas.models import CrawlJob, CrawlJobStatus
 from services.crawl_jobs.store import CrawlJobStore
 from services.url_frontier.manager import URLFrontier
@@ -30,7 +33,7 @@ async def lifespan(_: FastAPI):
     await frontier.close()
 
 
-app = FastAPI(title="ATLAS Crawl API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="ATLAS Crawl API", version=settings.VERSION, lifespan=lifespan)
 
 
 def normalize_domains(domains: list[str]) -> list[str]:
@@ -39,6 +42,8 @@ def normalize_domains(domains: list[str]) -> list[str]:
         value = domain.strip().lower().rstrip(".")
         if value.startswith("*."):
             value = value[2:]
+        elif value.startswith("."):
+            value = value.lstrip(".")
         if value:
             normalized.append(value)
     return sorted(set(normalized))
@@ -46,9 +51,29 @@ def normalize_domains(domains: list[str]) -> list[str]:
 
 def domain_allowed(hostname: str, whitelist: list[str], blacklist: list[str]) -> bool:
     host = hostname.lower().rstrip(".")
-    if whitelist and not any(host == d or host.endswith("." + d) for d in whitelist):
+    norm_white = normalize_domains(whitelist)
+    norm_black = normalize_domains(blacklist)
+    if norm_white and not any(host == d or host.endswith("." + d) for d in norm_white):
         return False
-    return not any(host == d or host.endswith("." + d) for d in blacklist)
+    return not any(host == d or host.endswith("." + d) for d in norm_black)
+
+
+def is_public_hostname_syntax(hostname: str) -> bool:
+    host = hostname.lower().rstrip(".")
+    if not host or host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
+    except ValueError:
+        return True
 
 
 @app.post("/crawl", response_model=CrawlJob, status_code=201)
@@ -62,12 +87,15 @@ async def create_crawl(request: CreateCrawlRequest):
         if not url:
             continue
         hostname = urlparse(url).hostname
-        if hostname and domain_allowed(hostname, whitelist, blacklist):
+        if hostname and is_public_hostname_syntax(hostname) and domain_allowed(hostname, whitelist, blacklist):
             seeds.append(url)
 
     seeds = list(dict.fromkeys(seeds))
     if not seeds:
-        raise HTTPException(status_code=400, detail="No valid HTTP(S) seeds remain after domain policy validation")
+        raise HTTPException(
+            status_code=400,
+            detail="No valid public HTTP(S) seeds remain after domain policy validation",
+        )
 
     job = CrawlJob(
         job_id=str(uuid.uuid4()),
@@ -93,7 +121,12 @@ async def create_crawl(request: CreateCrawlRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": settings.VERSION, "mock_mode": settings.MOCK_MODE}
+
+
+@app.get("/crawl", response_model=list[CrawlJob])
+async def list_crawls(limit: int = 50):
+    return await jobs.list_jobs(limit=max(1, min(limit, 200)))
 
 
 @app.get("/crawl/{job_id}", response_model=CrawlJob)
@@ -109,4 +142,13 @@ async def crawl_stats(job_id: str):
     job = await jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Crawl job not found")
-    return {"job_id": job_id, "pages_crawled": await jobs.pages(job_id), "status": job.status}
+    return {
+        "job_id": job_id,
+        "pages_crawled": await jobs.pages(job_id),
+        "active_urls": await frontier.active_for_job(job_id),
+        "status": job.status,
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host=settings.CRAWLER_API_HOST, port=settings.CRAWLER_API_PORT)

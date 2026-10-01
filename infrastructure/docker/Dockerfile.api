@@ -7,16 +7,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements/pyproject
+# Copy project metadata and source code before installing package
 COPY pyproject.toml .
-# We need to install the project in editable mode or just install dependencies
-# For a container, we'll install dependencies first
-RUN pip install --no-cache-dir .
-
-# Copy source code
 COPY apps/ apps/
 COPY libs/ libs/
 COPY services/ services/
+
+RUN pip install --no-cache-dir .
+
+# Pre-download the embedding model used for query encoding
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
