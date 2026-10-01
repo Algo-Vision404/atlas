@@ -7,14 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+
 COPY apps/ apps/
 COPY libs/ libs/
 COPY services/ services/
-
-RUN pip install --no-cache-dir .
-
-# Pre-download the embedding model used during document extraction
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app

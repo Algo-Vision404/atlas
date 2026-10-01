@@ -67,21 +67,16 @@ services:
       - "8123:8123"
       - "9000:9000"
 
+  # ATLAS Services (Example placement)
+  # In production, these would be separate deployments
   # ATLAS Services
   search-api:
-    build:
+    build: 
       context: ../../
       dockerfile: infrastructure/docker/Dockerfile.api
     ports:
       - "8000:8000"
     env_file: ../../.env
-    environment:
-      OPENSEARCH_URL: http://opensearch:9200
-      QDRANT_URL: http://qdrant:6333
-      REDIS_URL: redis://redis:6379/0
-      KAFKA_SERVERS: redpanda:29092
-      DATABASE_URL: postgresql://atlas:password@postgres:5432/atlas
-      NEO4J_URI: bolt://neo4j:7687
     depends_on:
       - postgres
       - qdrant
@@ -92,9 +87,6 @@ services:
       context: ../../
       dockerfile: infrastructure/docker/Dockerfile.crawler
     env_file: ../../.env
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      KAFKA_SERVERS: redpanda:29092
     depends_on:
       - redis
       - redpanda
@@ -107,9 +99,6 @@ services:
     ports:
       - "8001:8001"
     env_file: ../../.env
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      KAFKA_SERVERS: redpanda:29092
     depends_on:
       - redis
 
@@ -118,11 +107,6 @@ services:
       context: ../../
       dockerfile: infrastructure/docker/Dockerfile.indexer
     env_file: ../../.env
-    environment:
-      OPENSEARCH_URL: http://opensearch:9200
-      QDRANT_URL: http://qdrant:6333
-      KAFKA_SERVERS: redpanda:29092
-      REDIS_URL: redis://redis:6379/0
     depends_on:
       - opensearch
       - qdrant
