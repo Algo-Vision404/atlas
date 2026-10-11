@@ -22,4 +22,45 @@ jobs:
       - name: Compile
         run: python -m compileall apps libs services
       - name: Test
-        run: pytest -q
+        run: |
+          set -o pipefail
+          pytest -q --tb=short 2>&1 | tee pytest.log
+      # Surface the failing tests (and the environment) as annotations so a red
+      # build is diagnosable from the PR without digging through raw logs.
+      - name: Report failures
+        if: failure()
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          try:
+              log = open("pytest.log", errors="replace").read()
+          except OSError:
+              log = ""
+
+          def emit(kind: str, message: str) -> None:
+              message = message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print(f"::{kind}::{message[:900]}")
+
+          emit("notice", "python: " + subprocess.run(
+              ["python", "-V"], capture_output=True, text=True
+          ).stdout.strip())
+          packages = subprocess.run(["pip", "list"], capture_output=True, text=True).stdout
+          relevant = "\n".join(
+              line for line in packages.splitlines()
+              if re.search(r"beautifulsoup|soupsieve|pydantic|pytest|fastapi|starlette|"
+                           r"httpx|redis|kafka|qdrant|opensearch|numpy|torch|sentence", line, re.I)
+          )
+          emit("notice", "dependencies:\n" + relevant)
+
+          failures = [
+              line for line in log.splitlines()
+              if line.startswith(("FAILED", "ERROR")) or line.startswith("E ")
+          ]
+          for line in failures[:8]:
+              emit("error", line)
+          if log:
+              emit("error", "pytest output (tail):\n" + "\n".join(log.splitlines()[-30:]))
+          PY
