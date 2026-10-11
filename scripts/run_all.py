@@ -9,14 +9,22 @@ def run_service(name: str, path: str, mock_mode: str = "true") -> subprocess.Pop
     env = os.environ.copy()
     env["PYTHONPATH"] = "."
     env.setdefault("MOCK_MODE", mock_mode)
-    process = subprocess.Popen(
-        [sys.executable, path],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    return process
+    # Deliberately inherit stdout/stderr: piping without draining the buffers
+    # deadlocks the child as soon as it logs more than the pipe capacity.
+    return subprocess.Popen([sys.executable, path], env=env)
+
+
+def stop_all(processes: list[subprocess.Popen]) -> None:
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+    deadline = time.time() + 10
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(0.1, deadline - time.time()))
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 if __name__ == "__main__":
@@ -27,7 +35,8 @@ if __name__ == "__main__":
         ("Indexer", "apps/indexer/worker.py"),
     ]
 
-    processes = []
+    processes: list[subprocess.Popen] = []
+    exit_code = 0
     try:
         for name, path in services:
             processes.append(run_service(name, path))
@@ -41,17 +50,16 @@ if __name__ == "__main__":
         print("Press Ctrl+C to stop all services.\n")
 
         while True:
-            for p in processes:
-                if p.poll() is not None:
-                    output = p.stdout.read() if p.stdout else ""
-                    print(f"Process {p.pid} exited with code {p.returncode}")
-                    if output:
-                        print(output)
-                    sys.exit(1)
+            for process in processes:
+                if process.poll() is not None:
+                    print(f"Process {process.pid} exited with code {process.returncode}")
+                    exit_code = process.returncode or 1
+                    raise KeyboardInterrupt
             time.sleep(5)
 
     except KeyboardInterrupt:
         print("\nStopping ATLAS services...")
-        for p in processes:
-            p.terminate()
+    finally:
+        stop_all(processes)
         print("Done.")
+    sys.exit(exit_code)

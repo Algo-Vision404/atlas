@@ -1,7 +1,5 @@
 from rich.theme import Theme
 from rich.console import Console
-from rich.panel import Panel
-from rich.text import Text
 from rich.align import Align
 from rich.rule import Rule
 
@@ -20,12 +18,15 @@ ATLAS_THEME = Theme({
 console = Console(theme=ATLAS_THEME)
 
 def print_header(subtitle: str = "SYSTEMS ONLINE"):
-    banner = """
+    # Raw string: the ASCII art is full of backslashes that must not be read as
+    # escape sequences (`\|` raised a DeprecationWarning on Python 3.11 and a
+    # SyntaxWarning on 3.12+).
+    banner = r"""
     [brand]
-    ___  _____ _      ___   _____ 
+    ___  _____ _      ___   _____
    / _ \|_   _| |    / _ \ /  ___|
-  / /_\ \ | | | |   / /_\ \\ `--. 
-  |  _  | | | | |   |  _  | `--. \\
+  / /\ \ | | | |   / /\ \ `--.
+  |  _  | | | | |   |  _  | `--. \
   | | | | | | | |___| | | |/\__/ /
   \_| |_/ \_/ \_____/\_| |_/\____/ [/]
     [muted]DISTRIBUTED WEB INTELLIGENCE ENGINE[/]
@@ -33,6 +34,7 @@ def print_header(subtitle: str = "SYSTEMS ONLINE"):
     console.print(Align.center(banner))
     console.print(Rule(subtitle, style="brand"))
     console.print("\n")
+
 
 def print_step(message: str, status: str = "info"):
     icon = "->"

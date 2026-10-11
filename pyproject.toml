@@ -2,6 +2,8 @@
 name = "atlas-system"
 version = "0.2.0"
 description = "Distributed Web Crawl & Indexing CLI Engine"
+readme = "README.md"
+requires-python = ">=3.11"
 authors = [
     { name = "Atlas Team", email = "engineering@atlas-engine.io" }
 ]
