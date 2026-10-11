@@ -25,16 +25,25 @@ class EmbeddingEngine:
         self.dimension = dimension
         self.device = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"
         self.model: Optional[object] = None
+        # True when real embeddings are unavailable and hash vectors are used.
+        self.using_fallback = False
+        self._fallback_warned = False
 
     def _ensure_model(self) -> Optional[object]:
         if settings.MOCK_MODE:
+            self.using_fallback = True
             return None
         if self.model is not None:
             return self.model
         if SentenceTransformer is None:
-            logger.warning(
-                "sentence-transformers is not installed; falling back to deterministic embeddings"
-            )
+            self.using_fallback = True
+            if not self._fallback_warned:
+                self._fallback_warned = True
+                logger.error(
+                    "sentence-transformers is not installed: falling back to deterministic "
+                    "hash embeddings. Vector search will not return semantically meaningful "
+                    "results. Install the real dependency (pip install -e .) to fix this."
+                )
             return None
 
         logger.info("Loading embedding model: %s on %s", self.model_name, self.device)
@@ -42,6 +51,7 @@ class EmbeddingEngine:
         model_dim = getattr(self.model, "get_sentence_embedding_dimension", lambda: None)()
         if isinstance(model_dim, int) and model_dim > 0:
             self.dimension = model_dim
+        self.using_fallback = False
         return self.model
 
     def _mock_vector(self, text: str) -> List[float]:

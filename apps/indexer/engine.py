@@ -50,11 +50,18 @@ class OpenSearchIndex:
                 },
             )
 
+    def _require_client(self):
+        if self.client is None:
+            raise RuntimeError(
+                "opensearch-py is required: install it with `pip install opensearch-py`"
+            )
+        return self.client
+
     async def index(self, doc: Document):
         if settings.MOCK_MODE:
             self._mock_docs[doc.id] = doc
             return
-        await self.client.index(
+        await self._require_client().index(
             index=self.index_name,
             id=doc.id,
             body=doc.model_dump(mode="json", exclude={"embedding"}),
@@ -81,7 +88,7 @@ class OpenSearchIndex:
             scored.sort(key=lambda item: item["score"], reverse=True)
             return scored[:limit]
 
-        response = await self.client.search(
+        response = await self._require_client().search(
             index=self.index_name,
             body={
                 "size": limit,
@@ -140,6 +147,13 @@ class QdrantIndex:
                 ),
             )
 
+    def _require_client(self):
+        if self.client is None:
+            raise RuntimeError(
+                "qdrant-client is required: install it with `pip install qdrant-client`"
+            )
+        return self.client
+
     async def index(self, doc: Document):
         if not doc.embedding:
             return
@@ -155,7 +169,7 @@ class QdrantIndex:
                 },
             }
             return
-        await self.client.upsert(
+        await self._require_client().upsert(
             collection_name=self.collection_name,
             points=[
                 rest.PointStruct(
@@ -193,22 +207,25 @@ class QdrantIndex:
             return scored[:limit]
 
         hits = (
-            await self.client.query_points(
+            await self._require_client().query_points(
                 collection_name=self.collection_name,
                 query=vector,
                 limit=limit,
                 with_payload=True,
             )
         ).points
-        return [
-            {
-                "url": hit.payload.get("url"),
-                "title": hit.payload.get("title") or hit.payload.get("url"),
-                "snippet": (hit.payload.get("content") or "")[:300],
-                "score": float(hit.score),
-            }
-            for hit in hits
-        ]
+        results = []
+        for hit in hits:
+            payload = hit.payload or {}
+            results.append(
+                {
+                    "url": payload.get("url"),
+                    "title": payload.get("title") or payload.get("url"),
+                    "snippet": (payload.get("content") or "")[:300],
+                    "score": float(hit.score or 0.0),
+                }
+            )
+        return results
 
     async def close(self):
         if self.client:

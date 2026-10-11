@@ -40,7 +40,11 @@ def reciprocal_rank_fusion(
     merged: Dict[str, Dict] = {}
     for source, results in (("keyword", keyword_results), ("vector", vector_results)):
         for rank, result in enumerate(results):
-            url = result["url"]
+            url = result.get("url")
+            if not url:
+                # Without a URL there is nothing to rank or deduplicate on;
+                # merging unrelated hits under a None key would corrupt results.
+                continue
             entry = merged.setdefault(url, {**result, "score": 0.0, "sources": set()})
             entry["score"] += 1.0 / (k + rank + 1)
             entry["sources"].add(source)

@@ -93,9 +93,24 @@ class ContentParser:
             meta[tag["name"]] = tag.get("content", "")
         return meta
 
+    # Ordered main-content heuristics, kept equivalent to the previous CSS
+    # selectors ("main", "article", "#content", ".content", "#main-content",
+    # ".post-content") but expressed with BeautifulSoup's native finders:
+    # soupsieve (used by ``select_one``) ships regexes with possessive
+    # quantifiers that silently misbehave on CPython 3.11.0-3.11.4 (gh-106052),
+    # which made every parse raise SelectorSyntaxError.
+    MAIN_CONTENT_FINDERS = [
+        {"name": "main"},
+        {"name": "article"},
+        {"attrs": {"id": "content"}},
+        {"attrs": {"class": "content"}},
+        {"attrs": {"id": "main-content"}},
+        {"attrs": {"class": "post-content"}},
+    ]
+
     def _find_main_content(self, soup: BeautifulSoup) -> BeautifulSoup:
-        for selector in ["main", "article", "#content", ".content", "#main-content", ".post-content"]:
-            found = soup.select_one(selector)
+        for finder in self.MAIN_CONTENT_FINDERS:
+            found = soup.find(**finder)
             if found:
                 return found
         return soup.body if soup.body else soup
