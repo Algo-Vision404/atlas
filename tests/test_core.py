@@ -197,6 +197,40 @@ def test_content_parser_preserves_nav_links_and_extracts_clean_text():
     assert extracted.metadata["description"] == "Distributed search"
 
 
+def test_content_parser_normalises_title_markup_across_python_versions():
+    """Titles must not contain literal tag markup.
+
+    CPython 3.11.5+ (and 3.12+) parse ``<title>`` as RCDATA, so ``<title><span>A</span> B</title>``
+    hands BeautifulSoup the literal string ``"<span>A</span> B"``; older versions
+    (e.g. 3.11.2, the sandbox default) parse the nested tag and produce ``"A B"``.
+    The same literal string is what an escaped ``&lt;span&gt;`` title yields on every
+    version, which is what this test feeds in so the regression is reproducible
+    locally regardless of the interpreter.
+    """
+    parser = ContentParser()
+    html = """
+    <html>
+      <head><title>&lt;span&gt;Atlas&lt;/span&gt; Documentation</title></head>
+      <body><main><p>Body copy.</p></main></body>
+    </html>
+    """
+    extracted = parser.parse(html, "https://example.com/")
+    assert extracted.title == "Atlas Documentation"
+
+
+def test_content_parser_keeps_code_samples_containing_tag_like_text():
+    """Tag-looking text in code samples is content, not markup, and must survive."""
+    parser = ContentParser()
+    html = """
+    <html>
+      <head><title>Docs</title></head>
+      <body><main><pre><code>&lt;div class="x"&gt;hello&lt;/div&gt;</code></pre></main></body>
+    </html>
+    """
+    extracted = parser.parse(html, "https://example.com/")
+    assert '<div class="x">hello</div>' in extracted.text
+
+
 @pytest.mark.asyncio
 async def test_frontier_skips_rate_limited_host_without_head_of_line_blocking(monkeypatch):
     monkeypatch.setattr(settings, "MOCK_MODE", False)

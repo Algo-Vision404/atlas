@@ -7,6 +7,18 @@ from urllib.parse import urldefrag, urljoin, urlparse
 from bs4 import BeautifulSoup
 
 
+# Markup that ``html.parser`` hands over as literal text for RCDATA elements
+# (``<title>``, ``<textarea>``) on CPython 3.11.5+/3.12+. Stripping it keeps
+# titles identical on every interpreter instead of leaking ``<span>`` noise
+# into indexed documents.
+_LITERAL_TAG_RE = re.compile(r"</?[A-Za-z][^>]*>")
+
+
+def _readable_text(value: str) -> str:
+    """Collapse whitespace and drop tag markup that survived RCDATA parsing."""
+    return " ".join(_LITERAL_TAG_RE.sub(" ", value).split())
+
+
 @dataclass
 class ExtractedContent:
     title: str
@@ -20,17 +32,28 @@ class ExtractedContent:
 
 class ContentParser:
     def __init__(self):
-        self.non_content_tags = ["script", "style", "iframe", "noscript", "svg"]
+        # script/style/iframe/xmp/noembed/noframes are raw-text or legacy
+        # elements whose contents would otherwise pollute the extracted text.
+        self.non_content_tags = [
+            "script",
+            "style",
+            "iframe",
+            "noscript",
+            "svg",
+            "xmp",
+            "noembed",
+            "noframes",
+        ]
         self.boilerplate_tags = ["nav", "footer", "header", "aside"]
 
     def parse(self, html: str, url: str) -> ExtractedContent:
         soup = BeautifulSoup(html, "html.parser")
 
         # 1. Basic Metadata Extraction
-        title = " ".join(soup.title.get_text().split()) if soup.title else ""
+        title = _readable_text(soup.title.get_text()) if soup.title else ""
         if not title:
             h1 = soup.find("h1")
-            title = " ".join(h1.get_text().split()) if h1 else ""
+            title = _readable_text(h1.get_text()) if h1 else ""
 
         # 2. Schema.org / OpenGraph / Meta
         metadata = self._extract_metadata(soup)
