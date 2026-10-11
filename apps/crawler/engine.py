@@ -30,6 +30,13 @@ REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 # 4xx codes that are worth retrying: request timeout, too-early, rate limiting.
 RETRYABLE_STATUSES = {408, 425, 429}
 
+# How long a failed/denied robots.txt result is cached before being retried.
+ROBOTS_FAILURE_CACHE_TTL = 300
+
+# Sentinel stored in the robots cache for origins whose policy could not be read
+# (network error, 5xx, oversized file, unsafe redirect target).
+_ROBOTS_DENIED = object()
+
 # Exponential backoff applied when a worker iteration fails (Redis/DNS hiccups).
 RUN_RETRY_BACKOFF = 2.0
 RUN_RETRY_MAX_BACKOFF = 30.0
@@ -73,30 +80,57 @@ class CrawlerEngine:
             return True
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
-        cached = self._robots_cache.get(origin)
         now = asyncio.get_running_loop().time()
-        if cached and cached[0] > now:
-            return cached[1].can_fetch(self.user_agent, url)
+        parser = self._cached_robots_parser(origin, now)
+        if parser is _ROBOTS_DENIED:
+            return False
+        if parser is None:
+            parser = await self._fetch_robots_parser(origin, now)
+            if parser is _ROBOTS_DENIED:
+                return False
+        return parser.can_fetch(self.user_agent, url)
 
+    def _cached_robots_parser(self, origin: str, now: float):
+        """Return a cached parser, ``None`` if unknown, or ``_ROBOTS_DENIED``."""
+        cached = self._robots_cache.get(origin)
+        if not cached or cached[0] <= now:
+            return None
+        return cached[1]
+
+    async def _fetch_robots_parser(self, origin: str, now: float):
+        """Fetch and cache robots.txt. Returns a parser or ``_ROBOTS_DENIED``.
+
+        Failures are cached too (for a shorter period) so a broken or hostile
+        robots.txt is not re-requested for every single URL of that origin.
+        """
         robots_url = f"{origin}/robots.txt"
         parser = robotparser.RobotFileParser()
         parser.set_url(robots_url)
+
+        def deny() -> None:
+            self._robots_cache[origin] = (
+                now + min(ROBOTS_FAILURE_CACHE_TTL, max(1, settings.ROBOTS_CACHE_TTL)),
+                _ROBOTS_DENIED,
+            )
 
         current_url = robots_url
         try:
             for _ in range(settings.MAX_REDIRECTS + 1):
                 if not await self.is_safe_url(current_url):
                     logger.warning("Unsafe robots.txt destination rejected for %s (%s)", origin, current_url)
-                    return False
+                    deny()
+                    return _ROBOTS_DENIED
                 async with self.session.get(current_url, allow_redirects=False) as response:
                     if response.status in REDIRECT_STATUSES:
                         location = response.headers.get("Location")
                         if not location:
-                            return False
+                            deny()
+                            return _ROBOTS_DENIED
                         next_url, _ = urldefrag(urljoin(current_url, location))
                         next_parsed = urlparse(next_url)
                         if next_parsed.scheme not in {"http", "https"} or not next_parsed.netloc:
-                            return False
+                            deny()
+                            return _ROBOTS_DENIED
                         current_url = next_url
                         continue
 
@@ -104,23 +138,29 @@ class CrawlerEngine:
                         parser.parse([])
                     elif response.status != 200:
                         logger.warning("robots.txt returned HTTP %s for %s", response.status, origin)
-                        return False
+                        deny()
+                        return _ROBOTS_DENIED
                     else:
                         body = await response.read()
                         if len(body) > 1_000_000:
                             logger.warning("robots.txt too large for %s", origin)
-                            return False
-                        parser.parse(body.decode(response.charset or "utf-8", errors="replace").splitlines())
+                            deny()
+                            return _ROBOTS_DENIED
+                        parser.parse(
+                            body.decode(response.charset or "utf-8", errors="replace").splitlines()
+                        )
                     break
             else:
                 logger.warning("Too many redirects fetching robots.txt for %s", origin)
-                return False
+                deny()
+                return _ROBOTS_DENIED
         except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError) as exc:
             logger.warning("robots.txt fetch failed for %s: %s", origin, exc)
-            return False
+            deny()
+            return _ROBOTS_DENIED
 
         self._robots_cache[origin] = (now + settings.ROBOTS_CACHE_TTL, parser)
-        return parser.can_fetch(self.user_agent, url)
+        return parser
 
     @staticmethod
     def _is_public_ip(ip_str: str) -> bool:

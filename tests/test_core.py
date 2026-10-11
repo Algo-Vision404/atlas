@@ -822,3 +822,84 @@ async def test_indexer_consumer_rewinds_when_dead_letter_publish_fails(monkeypat
     # The message was never acknowledged: no commit, offset rewound for redelivery.
     assert consumer.commits == 0
     assert consumer.seeks and consumer.seeks[0][1] == 0
+
+
+@pytest.mark.asyncio
+async def test_robots_failures_are_cached_and_respected(monkeypatch):
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    monkeypatch.setattr(settings, "RESPECT_ROBOTS_TXT", True)
+
+    frontier = URLFrontier()
+    frontier.redis = FakeRedis()
+    crawler = CrawlerEngine(frontier)
+
+    requested: List[str] = []
+
+    class FakeResponse:
+        status = 503
+        headers = {"Content-Type": "text/plain"}
+        charset = "utf-8"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def read(self):
+            return b"unavailable"
+
+    class FakeSession:
+        def get(self, url: str, allow_redirects: bool = False):
+            requested.append(url)
+            return FakeResponse()
+
+    crawler.session = FakeSession()
+
+    async def fake_is_safe(_: str) -> bool:
+        return True
+
+    monkeypatch.setattr(crawler, "is_safe_url", fake_is_safe)
+
+    assert await crawler.allowed_by_robots("https://broken.example.com/a") is False
+    assert await crawler.allowed_by_robots("https://broken.example.com/b") is False
+    # The failed policy is cached: the origin is not hammered once per URL.
+    assert requested == ["https://broken.example.com/robots.txt"]
+
+
+@pytest.mark.asyncio
+async def test_robots_allow_and_disallow_are_enforced(monkeypatch):
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    monkeypatch.setattr(settings, "RESPECT_ROBOTS_TXT", True)
+
+    frontier = URLFrontier()
+    frontier.redis = FakeRedis()
+    crawler = CrawlerEngine(frontier)
+
+    class FakeResponse:
+        status = 200
+        headers = {"Content-Type": "text/plain"}
+        charset = "utf-8"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def read(self):
+            return b"User-agent: *\nDisallow: /private\n"
+
+    class FakeSession:
+        def get(self, url: str, allow_redirects: bool = False):
+            return FakeResponse()
+
+    crawler.session = FakeSession()
+
+    async def fake_is_safe(_: str) -> bool:
+        return True
+
+    monkeypatch.setattr(crawler, "is_safe_url", fake_is_safe)
+
+    assert await crawler.allowed_by_robots("https://site.example.com/public") is True
+    assert await crawler.allowed_by_robots("https://site.example.com/private/x") is False
