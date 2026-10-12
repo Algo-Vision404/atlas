@@ -282,12 +282,16 @@ def crawl_dashboard():
                     sidebar.add_row("Queued", str(stats["queued"]))
                     sidebar.add_row("In-Flight", str(stats["processing"]))
                     sidebar.add_row("Completed", str(stats["completed"]))
+                    health_title = "Node Health"
                 else:
-                    sidebar.add_row("CPU", f"{random.randint(40, 60)}%")
-                    sidebar.add_row("MEM", f"{random.randint(20, 30)}GB")
-                    sidebar.add_row("NET", f"{random.randint(100, 500)}MB/s")
+                    # No live frontier telemetry: show clearly-labelled placeholders
+                    # instead of fake numbers that look real.
+                    sidebar.add_row("CPU", f"~{random.randint(40, 60)}%")
+                    sidebar.add_row("MEM", f"~{random.randint(20, 30)}GB")
+                    sidebar.add_row("NET", f"~{random.randint(100, 500)}MB/s")
+                    health_title = "Node Health (simulated)"
                 layout["sidebar"].update(
-                    Panel(sidebar, title="Node Health", border_style="yellow")
+                    Panel(sidebar, title=health_title, border_style="yellow")
                 )
 
                 time.sleep(0.5)

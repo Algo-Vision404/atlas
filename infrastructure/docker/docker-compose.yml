@@ -1,25 +1,39 @@
-version: '3.8'
-
+# Compose specification (the legacy top-level `version:` key is obsolete).
 services:
   # Metadata & Transactional Store
   postgres:
     image: postgres:15-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: atlas
       POSTGRES_PASSWORD: password
       POSTGRES_DB: atlas
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   # Cache & Frontier Queue
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   # Event Bus (Kafka Compatible)
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v23.2.1
+    restart: unless-stopped
     command:
       - redpanda start
       - --smp 1
@@ -32,10 +46,17 @@ services:
     ports:
       - "9092:9092"
       - "29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   # Keyword Search Index
   opensearch:
     image: opensearchproject/opensearch:2.9.0
+    restart: unless-stopped
     environment:
       - discovery.type=single-node
       - bootstrap.memory_lock=true
@@ -44,16 +65,24 @@ services:
       - DISABLE_SECURITY_PLUGIN=true
     ports:
       - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 40s
 
   # Vector Search Index
   qdrant:
     image: qdrant/qdrant:latest
+    restart: unless-stopped
     ports:
       - "6333:6333"
 
   # Graph Database
   neo4j:
     image: neo4j:5-community
+    restart: unless-stopped
     environment:
       - NEO4J_AUTH=neo4j/password
     ports:
@@ -63,6 +92,7 @@ services:
   # Analytics Store
   clickhouse:
     image: clickhouse/clickhouse-server:latest
+    restart: unless-stopped
     ports:
       - "8123:8123"
       - "9000:9000"
@@ -72,6 +102,7 @@ services:
     build:
       context: ../../
       dockerfile: infrastructure/docker/Dockerfile.api
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file: ../../.env
@@ -83,26 +114,33 @@ services:
       DATABASE_URL: postgresql://atlas:password@postgres:5432/atlas
       NEO4J_URI: bolt://neo4j:7687
     depends_on:
-      - postgres
-      - qdrant
-      - opensearch
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      opensearch:
+        condition: service_healthy
 
   crawler:
     build:
       context: ../../
       dockerfile: infrastructure/docker/Dockerfile.crawler
+    restart: unless-stopped
     env_file: ../../.env
     environment:
       REDIS_URL: redis://redis:6379/0
       KAFKA_SERVERS: redpanda:29092
     depends_on:
-      - redis
-      - redpanda
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
 
   crawler-api:
     build:
       context: ../../
       dockerfile: infrastructure/docker/Dockerfile.crawler
+    restart: unless-stopped
     command: ["uvicorn", "apps.crawler.api:app", "--host", "0.0.0.0", "--port", "8001"]
     ports:
       - "8001:8001"
@@ -111,12 +149,14 @@ services:
       REDIS_URL: redis://redis:6379/0
       KAFKA_SERVERS: redpanda:29092
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
 
   indexer:
     build:
       context: ../../
       dockerfile: infrastructure/docker/Dockerfile.indexer
+    restart: unless-stopped
     env_file: ../../.env
     environment:
       OPENSEARCH_URL: http://opensearch:9200
@@ -124,6 +164,9 @@ services:
       KAFKA_SERVERS: redpanda:29092
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      - opensearch
-      - qdrant
-      - redpanda
+      opensearch:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      redpanda:
+        condition: service_healthy

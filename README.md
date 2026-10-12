@@ -10,10 +10,10 @@ Redpanda is provisioned as the event-bus layer for the next streaming stage, whi
 
 ## Current capabilities
 
-- Redis-backed URL deduplication, priority scheduling, crawl-job metadata, and page counters.
+- Redis-backed URL canonicalization/deduplication with a configurable recrawl window, priority scheduling, crawl-job metadata, and page counters.
 - Per-host concurrency limits and politeness delays.
 - Worker leases with stale-work recovery and lease refresh during long processing.
-- Bounded retries with retry-priority decay.
+- Bounded retries with retry-priority decay, plus per-host politeness and RFC-compliant robots.txt handling.
 - Async HTML crawler with streaming response-size limits.
 - Public-destination checks that reject loopback, private, link-local, multicast, and reserved addresses.
 - robots.txt enforcement with cached host policies.
@@ -22,7 +22,7 @@ Redpanda is provisioned as the event-bus layer for the next streaming stage, whi
 - HTML parsing and document normalization.
 - Sentence-Transformer embeddings.
 - Redpanda event boundary between extraction and indexing.
-- Consumer-group indexer with commit-after-success semantics.
+- Consumer-group indexer with bounded in-process retries and commit-after-success semantics (messages are committed only once they are indexed or dead-lettered).
 - Real OpenSearch BM25 retrieval.
 - Real Qdrant vector retrieval.
 - Reciprocal Rank Fusion for hybrid retrieval.
@@ -31,7 +31,7 @@ Redpanda is provisioned as the event-bus layer for the next streaming stage, whi
 
 ## Run locally
 
-Copy `.env.example` to `.env`, then start the required infrastructure:
+Requires Python 3.11 or newer. Copy `.env.example` to `.env` (it is read from the repository root, whatever directory you launch from), then start the required infrastructure:
 
     docker compose -f infrastructure/docker/docker-compose.yml up -d redis opensearch qdrant
     pip install -e .
@@ -44,6 +44,7 @@ Search endpoints:
 
 - GET /health
 - GET /search/keyword?q=distributed+systems
+- GET /search/semantic?q=distributed+systems
 - GET /search/hybrid?q=distributed+systems
 
 Start a crawler worker:
@@ -67,9 +68,11 @@ Inspect a crawl:
 
 ## Operational boundaries
 
-ATLAS is not yet an internet-scale search platform. The remaining major stages are production observability, graph extraction/indexing, stronger crawl scheduling, event replay/dead-letter handling, and deployment hardening.
+ATLAS is not yet an internet-scale search platform. The remaining major stages are production observability, graph extraction/indexing, stronger crawl scheduling, event replay tooling, and deployment hardening.
 
-The crawler intentionally refuses non-public network destinations. This is a security boundary, not a guarantee against every possible DNS or redirect abuse case.
+The crawler intentionally refuses non-public network destinations (including private, loopback, link-local, CGNAT, and reserved ranges). This is a security boundary, not a guarantee against every possible DNS or redirect abuse case.
+
+Within a crawl window, each canonical URL is fetched once. Setting `RECRAWL_INTERVAL` (seconds, default 24h) to a lower value lets completed, failed, or skipped URLs be enqueued again once they age past the window; `0` restores permanent deduplication.
 
 Do not deploy the default Docker credentials or unrestricted infrastructure configuration to production.
 

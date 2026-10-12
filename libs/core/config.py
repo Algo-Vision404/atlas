@@ -1,8 +1,14 @@
+from pathlib import Path
 from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Resolve .env relative to the repository root so the same configuration is
+# picked up no matter which directory a service or the CLI is started from.
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=str(ENV_FILE), extra="ignore", case_sensitive=False)
 
     PROJECT_NAME: str = "ATLAS"
     VERSION: str = "0.2.0"
@@ -27,6 +33,14 @@ class Settings(BaseSettings):
     RESPECT_ROBOTS_TXT: bool = True
     ROBOTS_CACHE_TTL: int = 3600
     WORKER_LEASE_TTL: int = 120
+    # Seconds before an already-crawled URL may be enqueued again (recrawl
+    # freshness window). Set to 0 to keep the original permanent-dedupe behaviour.
+    RECRAWL_INTERVAL: int = 86400
+
+    # Indexer consumer behaviour: transient failures are retried in-process
+    # before the message is routed to the dead-letter topic.
+    INDEXER_MAX_ATTEMPTS: int = 3
+    INDEXER_RETRY_BACKOFF: float = 2.0
 
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     EMBEDDING_DIMENSION: int = 384

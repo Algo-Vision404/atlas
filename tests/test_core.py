@@ -1,4 +1,7 @@
+import asyncio
 import time
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pytest
@@ -194,6 +197,40 @@ def test_content_parser_preserves_nav_links_and_extracts_clean_text():
     assert extracted.metadata["description"] == "Distributed search"
 
 
+def test_content_parser_normalises_title_markup_across_python_versions():
+    """Titles must not contain literal tag markup.
+
+    CPython 3.11.5+ (and 3.12+) parse ``<title>`` as RCDATA, so ``<title><span>A</span> B</title>``
+    hands BeautifulSoup the literal string ``"<span>A</span> B"``; older versions
+    (e.g. 3.11.2, the sandbox default) parse the nested tag and produce ``"A B"``.
+    The same literal string is what an escaped ``&lt;span&gt;`` title yields on every
+    version, which is what this test feeds in so the regression is reproducible
+    locally regardless of the interpreter.
+    """
+    parser = ContentParser()
+    html = """
+    <html>
+      <head><title>&lt;span&gt;Atlas&lt;/span&gt; Documentation</title></head>
+      <body><main><p>Body copy.</p></main></body>
+    </html>
+    """
+    extracted = parser.parse(html, "https://example.com/")
+    assert extracted.title == "Atlas Documentation"
+
+
+def test_content_parser_keeps_code_samples_containing_tag_like_text():
+    """Tag-looking text in code samples is content, not markup, and must survive."""
+    parser = ContentParser()
+    html = """
+    <html>
+      <head><title>Docs</title></head>
+      <body><main><pre><code>&lt;div class="x"&gt;hello&lt;/div&gt;</code></pre></main></body>
+    </html>
+    """
+    extracted = parser.parse(html, "https://example.com/")
+    assert '<div class="x">hello</div>' in extracted.text
+
+
 @pytest.mark.asyncio
 async def test_frontier_skips_rate_limited_host_without_head_of_line_blocking(monkeypatch):
     monkeypatch.setattr(settings, "MOCK_MODE", False)
@@ -282,6 +319,57 @@ async def test_crawler_rejects_ssrf_redirect_before_following(monkeypatch):
     meta = await frontier.get_metadata("https://public.example.com/start")
     assert meta.status == CrawlStatus.SKIPPED
     assert "redirected to a non-public destination" in (meta.error or "")
+
+
+@pytest.mark.asyncio
+async def test_crawler_skips_permanent_client_errors_without_retrying(monkeypatch):
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    frontier = URLFrontier()
+    frontier.redis = FakeRedis()
+    url = "https://public.example.com/missing"
+    await frontier.add_urls([url], depth=0)
+    assert await frontier.get_next_url() == (url, 0)
+
+    crawler = CrawlerEngine(frontier)
+    requests: List[str] = []
+
+    class FakeResponse:
+        status = 404
+        headers = {"Content-Type": "text/html"}
+        charset = "utf-8"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def read(self):
+            return b"not found"
+
+        @property
+        def content(self):
+            raise AssertionError("body must not be read for an error response")
+
+    class FakeSession:
+        def get(self, request_url: str, allow_redirects: bool = False):
+            requests.append(request_url)
+            return FakeResponse()
+
+    crawler.session = FakeSession()
+
+    async def fake_is_safe(_: str) -> bool:
+        return True
+
+    monkeypatch.setattr(crawler, "is_safe_url", fake_is_safe)
+
+    assert await crawler.fetch(url) is None
+    assert requests == [url]
+    meta = await frontier.get_metadata(url)
+    # 404 is terminal: no retry budget is consumed and the URL is not requeued.
+    assert meta.status == CrawlStatus.SKIPPED
+    assert meta.retry_count == 0
+    assert frontier.queue_key not in frontier.redis.zsets or url not in frontier.redis.zsets[frontier.queue_key]
 
 
 @pytest.mark.asyncio
@@ -416,3 +504,436 @@ def test_domain_policy_helpers():
     ]
     assert domain_allowed("api.example.com", ["example.com"], ["bad.example.com"]) is True
     assert domain_allowed("bad.example.com", ["example.com"], ["bad.example.com"]) is False
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the audit fixes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("HTTP://Example.COM:80/A#frag", "http://example.com/A"),
+        ("https://Example.com:443/", "https://example.com"),
+        ("https://example.com:8443/a", "https://example.com:8443/a"),
+        ("https://example.com/?q=1", "https://example.com/?q=1"),
+        ("https://example.com/a?", "https://example.com/a"),
+        ("http://example.com:notaport/", None),
+        ("javascript:alert(1)", None),
+    ],
+)
+def test_url_canonicalization_deduplicates_equivalent_spellings(raw, expected):
+    assert URLFrontier.normalize_url(raw) == expected
+
+
+@pytest.mark.asyncio
+async def test_frontier_recrawls_only_after_the_configured_interval(monkeypatch):
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    monkeypatch.setattr(settings, "RECRAWL_INTERVAL", 3600)
+    frontier = URLFrontier()
+    frontier.redis = FakeRedis()
+
+    url = "https://example.com/page"
+    assert await frontier.add_urls([url], depth=0, job_id="job-1") == 1
+    # Already queued for the same crawl window: no duplicate work.
+    assert await frontier.add_urls([url], depth=0, job_id="job-1") == 0
+
+    assert await frontier.get_next_url() == (url, 0)
+    await frontier.mark_completed(url)
+
+    # Freshly crawled: still inside the freshness window.
+    assert await frontier.add_urls([url], depth=0, job_id="job-2") == 0
+
+    key = frontier._key(url)
+    meta = URLMetadata.model_validate_json(
+        await frontier.redis.get(f"{frontier.metadata_prefix}{key}")
+    )
+    meta.last_crawled_at = datetime.now(timezone.utc) - timedelta(seconds=7200)
+    await frontier.redis.set(f"{frontier.metadata_prefix}{key}", meta.model_dump_json())
+
+    # Aged past the window: enqueued again for the new job.
+    assert await frontier.add_urls([url], depth=0, job_id="job-2") == 1
+    assert await frontier.active_for_job("job-2") == 1
+
+
+@pytest.mark.asyncio
+async def test_frontier_recrawl_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    monkeypatch.setattr(settings, "RECRAWL_INTERVAL", 0)
+    frontier = URLFrontier()
+    frontier.redis = FakeRedis()
+
+    url = "https://example.com/page"
+    await frontier.add_urls([url], depth=0, job_id="job-1")
+    await frontier.get_next_url()
+    await frontier.mark_completed(url)
+    assert await frontier.add_urls([url], depth=0, job_id="job-2") == 0
+
+
+def test_content_parser_main_content_fallbacks_avoid_css_selectors():
+    parser = ContentParser()
+    markup = "<html><body><div>chrome</div>{}</body></html>"
+
+    assert parser.parse(markup.format("<main>MAIN</main>"), "https://e.com").text == "MAIN"
+    assert parser.parse(markup.format("<article>ART</article>"), "https://e.com").text == "ART"
+    assert (
+        parser.parse(markup.format('<section id="content">ID</section>'), "https://e.com").text == "ID"
+    )
+    assert (
+        parser.parse(markup.format('<section class="content">CLS</section>'), "https://e.com").text
+        == "CLS"
+    )
+    assert (
+        parser.parse(
+            markup.format('<section class="x post-content">POST</section>'), "https://e.com"
+        ).text
+        == "POST"
+    )
+    # Nothing matches: fall back to the whole body.
+    assert "chrome" in parser.parse(markup.format("<p>PLAIN</p>"), "https://e.com").text
+
+
+def test_private_and_special_purpose_ranges_are_rejected():
+    # Shared address space, benchmarking and metadata ranges must not be crawlable.
+    for ip in ("100.64.0.1", "100.100.100.200", "192.0.2.10", "198.18.0.5", "240.0.0.1"):
+        assert CrawlerEngine._is_public_ip(ip) is False
+    for ip in ("8.8.8.8", "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"):
+        assert CrawlerEngine._is_public_ip(ip) is True
+
+
+def test_response_decoding_falls_back_to_meta_charset():
+    body = '<html><head><meta charset="iso-8859-1"></head><body>caf\xe9</body></html>'.encode(
+        "latin-1"
+    )
+    assert "café" in CrawlerEngine._decode_body(body, None)
+    assert "café" in CrawlerEngine._decode_body("café".encode("utf-8"), "utf-8")
+    # Unknown charset must not crash the worker.
+    assert CrawlerEngine._decode_body(b"caf\xe9", "not-a-real-charset") == "caf\ufffd"
+
+
+def _extraction_event(url: str = "https://example.com/a") -> Dict[str, Any]:
+    document = Document(
+        id="doc-1",
+        url=url,
+        title="Example",
+        content="<html></html>",
+        text_clean="Example",
+        checksum="abc",
+    )
+    return AtlasEvent(
+        event_id="evt-index",
+        type=EventType.EXTRACTION_COMPLETED,
+        payload={"document": document.model_dump(mode="json")},
+        source="crawler",
+    ).model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_indexer_retries_transient_failures_then_succeeds(monkeypatch):
+    from apps.indexer.worker import _handle_record
+
+    monkeypatch.setattr(settings, "MOCK_MODE", True)
+    monkeypatch.setattr(settings, "INDEXER_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(settings, "INDEXER_RETRY_BACKOFF", 0.01)
+
+    index = IndexingService()
+    events = EventBus()
+    await index.initialize()
+
+    calls = {"count": 0}
+    real_index_document = index.index_document
+
+    async def flaky(doc):
+        calls["count"] += 1
+        if calls["count"] < 2:
+            raise ConnectionError("opensearch unavailable")
+        return await real_index_document(doc)
+
+    index.index_document = flaky
+
+    assert await _handle_record(_extraction_event(), index, events) is True
+    assert calls["count"] == 2
+    assert [topic for topic, _ in events.published_events] == [
+        EventTopic.INDEXING_COMPLETED.value
+    ]
+
+
+@pytest.mark.asyncio
+async def test_indexer_dead_letters_after_exhausting_retries(monkeypatch):
+    from apps.indexer.worker import _handle_record
+
+    monkeypatch.setattr(settings, "MOCK_MODE", True)
+    monkeypatch.setattr(settings, "INDEXER_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(settings, "INDEXER_RETRY_BACKOFF", 0.01)
+
+    index = IndexingService()
+    events = EventBus()
+    await index.initialize()
+
+    calls = {"count": 0}
+
+    async def always_down(doc):
+        calls["count"] += 1
+        raise ConnectionError("opensearch unavailable")
+
+    index.index_document = always_down
+
+    assert await _handle_record(_extraction_event(), index, events) is False
+    assert calls["count"] == 2
+    assert [topic for topic, _ in events.published_events] == [EventTopic.DEAD_LETTER.value]
+
+
+@pytest.mark.asyncio
+async def test_indexer_raises_when_dead_letter_publish_fails(monkeypatch):
+    """A failed DLQ publish must surface so the caller keeps the offset uncommitted."""
+    monkeypatch.setattr(settings, "MOCK_MODE", True)
+    index = IndexingService()
+    events = EventBus()
+    await index.initialize()
+
+    async def broken_publish(topic, event):
+        raise RuntimeError("kafka unavailable")
+
+    events.publish = broken_publish
+
+    with pytest.raises(RuntimeError):
+        await process_message({"invalid": "event_payload"}, index, events)
+
+
+@pytest.mark.asyncio
+async def test_crawler_worker_survives_transient_iteration_failures(monkeypatch):
+    from apps.crawler import engine as crawler_engine
+
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    monkeypatch.setattr(crawler_engine, "RUN_RETRY_BACKOFF", 0.01)
+    monkeypatch.setattr(crawler_engine, "RUN_RETRY_MAX_BACKOFF", 0.01)
+
+    frontier = URLFrontier()
+    frontier.redis = FakeRedis()
+    crawler = CrawlerEngine(frontier)
+
+    calls = {"count": 0}
+
+    async def flaky_process_next():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise ConnectionError("redis blip")
+        if calls["count"] >= 3:
+            raise asyncio.CancelledError
+        return False
+
+    crawler.process_next = flaky_process_next
+
+    with pytest.raises(asyncio.CancelledError):
+        await crawler.run_forever()
+
+    # The first failure did not terminate the loop.
+    assert calls["count"] == 3
+
+
+class _TopicPartition:
+    """Hashable stand-in for kafka.TopicPartition."""
+
+    def __init__(self, topic: str, partition: int = 0):
+        self.topic = topic
+        self.partition = partition
+
+    def __hash__(self) -> int:
+        return hash((self.topic, self.partition))
+
+    def __eq__(self, other: Any) -> bool:
+        return (self.topic, self.partition) == (
+            getattr(other, "topic", None),
+            getattr(other, "partition", None),
+        )
+
+
+class _FakeConsumer:
+    """Minimal KafkaConsumer stand-in that records commit/seek activity."""
+
+    def __init__(self, messages: List[Any]):
+        self._messages = list(messages)
+        self.tp = _TopicPartition("atlas.extraction-completed")
+        self.commits = 0
+        self.seeks: List[Tuple[Any, int]] = []
+        self.closed = False
+        self._offset = 0
+
+    def poll(self, timeout_ms: int):
+        if self._messages:
+            value = self._messages.pop(0)
+            batch = {self.tp: [SimpleNamespace(value=value, offset=self._offset)]}
+            self._offset += 1
+            return batch
+        time.sleep(0.02)
+        return {}
+
+    def commit(self):
+        self.commits += 1
+
+    def seek(self, topic_partition, offset):
+        self.seeks.append((topic_partition, offset))
+
+    def close(self):
+        self.closed = True
+
+
+def _install_indexer_stubs(monkeypatch, consumer, publish):
+    from apps.indexer import worker as worker_module
+
+    async def noop(self):
+        return None
+
+    async def noop_doc(self, doc):
+        return None
+
+    monkeypatch.setattr(IndexingService, "initialize", noop)
+    monkeypatch.setattr(IndexingService, "close", noop)
+    monkeypatch.setattr(IndexingService, "index_document", noop_doc)
+
+    class FakeEventBus:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def publish(self, topic, event):
+            return await publish(topic, event)
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(worker_module, "KafkaConsumer", lambda *a, **k: consumer)
+    monkeypatch.setattr(worker_module, "EventBus", FakeEventBus)
+
+
+@pytest.mark.asyncio
+async def test_indexer_consumer_commits_after_each_handled_record(monkeypatch):
+    from apps.indexer import worker as worker_module
+
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    monkeypatch.setattr(settings, "INDEXER_MAX_ATTEMPTS", 1)
+    consumer = _FakeConsumer([_extraction_event(), {"invalid": "payload"}])
+    published: List[str] = []
+
+    async def publish(topic, event):
+        published.append(topic)
+
+    _install_indexer_stubs(monkeypatch, consumer, publish)
+
+    task = asyncio.create_task(worker_module.run())
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # One commit per handled record, no rewinds, backends closed.
+    assert consumer.commits == 2
+    assert consumer.seeks == []
+    assert consumer.closed is True
+    assert EventTopic.DEAD_LETTER.value in published
+
+
+@pytest.mark.asyncio
+async def test_indexer_consumer_rewinds_when_dead_letter_publish_fails(monkeypatch):
+    from apps.indexer import worker as worker_module
+
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    monkeypatch.setattr(settings, "INDEXER_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(settings, "INDEXER_RETRY_BACKOFF", 0.01)
+    consumer = _FakeConsumer([{"invalid": "payload"}])
+
+    async def publish(topic, event):
+        raise RuntimeError("kafka unavailable")
+
+    _install_indexer_stubs(monkeypatch, consumer, publish)
+
+    task = asyncio.create_task(worker_module.run())
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The message was never acknowledged: no commit, offset rewound for redelivery.
+    assert consumer.commits == 0
+    assert consumer.seeks and consumer.seeks[0][1] == 0
+
+
+@pytest.mark.asyncio
+async def test_robots_failures_are_cached_and_respected(monkeypatch):
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    monkeypatch.setattr(settings, "RESPECT_ROBOTS_TXT", True)
+
+    frontier = URLFrontier()
+    frontier.redis = FakeRedis()
+    crawler = CrawlerEngine(frontier)
+
+    requested: List[str] = []
+
+    class FakeResponse:
+        status = 503
+        headers = {"Content-Type": "text/plain"}
+        charset = "utf-8"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def read(self):
+            return b"unavailable"
+
+    class FakeSession:
+        def get(self, url: str, allow_redirects: bool = False):
+            requested.append(url)
+            return FakeResponse()
+
+    crawler.session = FakeSession()
+
+    async def fake_is_safe(_: str) -> bool:
+        return True
+
+    monkeypatch.setattr(crawler, "is_safe_url", fake_is_safe)
+
+    assert await crawler.allowed_by_robots("https://broken.example.com/a") is False
+    assert await crawler.allowed_by_robots("https://broken.example.com/b") is False
+    # The failed policy is cached: the origin is not hammered once per URL.
+    assert requested == ["https://broken.example.com/robots.txt"]
+
+
+@pytest.mark.asyncio
+async def test_robots_allow_and_disallow_are_enforced(monkeypatch):
+    monkeypatch.setattr(settings, "MOCK_MODE", False)
+    monkeypatch.setattr(settings, "RESPECT_ROBOTS_TXT", True)
+
+    frontier = URLFrontier()
+    frontier.redis = FakeRedis()
+    crawler = CrawlerEngine(frontier)
+
+    class FakeResponse:
+        status = 200
+        headers = {"Content-Type": "text/plain"}
+        charset = "utf-8"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def read(self):
+            return b"User-agent: *\nDisallow: /private\n"
+
+    class FakeSession:
+        def get(self, url: str, allow_redirects: bool = False):
+            return FakeResponse()
+
+    crawler.session = FakeSession()
+
+    async def fake_is_safe(_: str) -> bool:
+        return True
+
+    monkeypatch.setattr(crawler, "is_safe_url", fake_is_safe)
+
+    assert await crawler.allowed_by_robots("https://site.example.com/public") is True
+    assert await crawler.allowed_by_robots("https://site.example.com/private/x") is False

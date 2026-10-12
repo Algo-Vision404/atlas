@@ -46,9 +46,9 @@ class Document(BaseModel):
 
 class CrawlJob(BaseModel):
     job_id: str
-    seeds: List[str]
-    max_depth: int = 3
-    max_pages: Optional[int] = None
+    seeds: List[str] = Field(min_length=1)
+    max_depth: int = Field(default=3, ge=0, le=20)
+    max_pages: Optional[int] = Field(default=None, ge=1)
     domain_whitelist: List[str] = Field(default_factory=list)
     domain_blacklist: List[str] = Field(default_factory=list)
     status: CrawlJobStatus = CrawlJobStatus.QUEUED

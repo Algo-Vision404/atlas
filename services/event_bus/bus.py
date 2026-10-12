@@ -11,6 +11,11 @@ from libs.schemas.models import AtlasEvent
 logger = logging.getLogger("atlas.event_bus")
 
 
+# Keep mock-mode history bounded: long simulation runs would otherwise grow
+# the process memory without limit.
+MOCK_EVENT_HISTORY_LIMIT = 1000
+
+
 class EventBus:
     """Kafka-compatible event publisher with non-blocking async boundaries."""
 
@@ -42,6 +47,8 @@ class EventBus:
         payload = event.model_dump(mode="json")
         if settings.MOCK_MODE:
             self.published_events.append((topic, payload))
+            if len(self.published_events) > MOCK_EVENT_HISTORY_LIMIT:
+                del self.published_events[: -MOCK_EVENT_HISTORY_LIMIT]
             logger.info("MOCK EventBus: published %s to %s", event.event_id, topic)
             return
 

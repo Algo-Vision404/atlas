@@ -1,5 +1,7 @@
 # ATLAS Build & Orchestration
 
+COMPOSE ?= docker compose
+
 .PHONY: help build up down status logs clean
 
 help:
@@ -13,20 +15,20 @@ help:
 	@echo "  make clean    Remove all containers and volumes"
 
 build:
-	docker-compose -f infrastructure/docker/docker-compose.yml build
+	$(COMPOSE) -f infrastructure/docker/docker-compose.yml build
 
 up:
-	docker-compose -f infrastructure/docker/docker-compose.yml up -d
+	$(COMPOSE) -f infrastructure/docker/docker-compose.yml up -d
 
 down:
-	docker-compose -f infrastructure/docker/docker-compose.yml down
+	$(COMPOSE) -f infrastructure/docker/docker-compose.yml down
 
 status:
-	docker-compose -f infrastructure/docker/docker-compose.yml ps
-	atlas status
+	$(COMPOSE) -f infrastructure/docker/docker-compose.yml ps
+	@atlas status
 
 logs:
-	docker-compose -f infrastructure/docker/docker-compose.yml logs -f
+	$(COMPOSE) -f infrastructure/docker/docker-compose.yml logs -f
 
 clean:
-	docker-compose -f infrastructure/docker/docker-compose.yml down -v --rmi all
+	$(COMPOSE) -f infrastructure/docker/docker-compose.yml down -v --rmi all

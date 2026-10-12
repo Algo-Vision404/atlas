@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import ipaddress
 import logging
+import re
 import socket
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -25,6 +26,20 @@ from services.url_frontier.manager import URLFrontier
 logger = logging.getLogger("atlas.crawler")
 
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+# 4xx codes that are worth retrying: request timeout, too-early, rate limiting.
+RETRYABLE_STATUSES = {408, 425, 429}
+
+# How long a failed/denied robots.txt result is cached before being retried.
+ROBOTS_FAILURE_CACHE_TTL = 300
+
+# Sentinel stored in the robots cache for origins whose policy could not be read
+# (network error, 5xx, oversized file, unsafe redirect target).
+_ROBOTS_DENIED = object()
+
+# Exponential backoff applied when a worker iteration fails (Redis/DNS hiccups).
+RUN_RETRY_BACKOFF = 2.0
+RUN_RETRY_MAX_BACKOFF = 30.0
 
 
 class CrawlerEngine:
@@ -65,30 +80,57 @@ class CrawlerEngine:
             return True
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
-        cached = self._robots_cache.get(origin)
         now = asyncio.get_running_loop().time()
-        if cached and cached[0] > now:
-            return cached[1].can_fetch(self.user_agent, url)
+        parser = self._cached_robots_parser(origin, now)
+        if parser is _ROBOTS_DENIED:
+            return False
+        if parser is None:
+            parser = await self._fetch_robots_parser(origin, now)
+            if parser is _ROBOTS_DENIED:
+                return False
+        return parser.can_fetch(self.user_agent, url)
 
+    def _cached_robots_parser(self, origin: str, now: float):
+        """Return a cached parser, ``None`` if unknown, or ``_ROBOTS_DENIED``."""
+        cached = self._robots_cache.get(origin)
+        if not cached or cached[0] <= now:
+            return None
+        return cached[1]
+
+    async def _fetch_robots_parser(self, origin: str, now: float):
+        """Fetch and cache robots.txt. Returns a parser or ``_ROBOTS_DENIED``.
+
+        Failures are cached too (for a shorter period) so a broken or hostile
+        robots.txt is not re-requested for every single URL of that origin.
+        """
         robots_url = f"{origin}/robots.txt"
         parser = robotparser.RobotFileParser()
         parser.set_url(robots_url)
+
+        def deny() -> None:
+            self._robots_cache[origin] = (
+                now + min(ROBOTS_FAILURE_CACHE_TTL, max(1, settings.ROBOTS_CACHE_TTL)),
+                _ROBOTS_DENIED,
+            )
 
         current_url = robots_url
         try:
             for _ in range(settings.MAX_REDIRECTS + 1):
                 if not await self.is_safe_url(current_url):
                     logger.warning("Unsafe robots.txt destination rejected for %s (%s)", origin, current_url)
-                    return False
+                    deny()
+                    return _ROBOTS_DENIED
                 async with self.session.get(current_url, allow_redirects=False) as response:
                     if response.status in REDIRECT_STATUSES:
                         location = response.headers.get("Location")
                         if not location:
-                            return False
+                            deny()
+                            return _ROBOTS_DENIED
                         next_url, _ = urldefrag(urljoin(current_url, location))
                         next_parsed = urlparse(next_url)
                         if next_parsed.scheme not in {"http", "https"} or not next_parsed.netloc:
-                            return False
+                            deny()
+                            return _ROBOTS_DENIED
                         current_url = next_url
                         continue
 
@@ -96,23 +138,29 @@ class CrawlerEngine:
                         parser.parse([])
                     elif response.status != 200:
                         logger.warning("robots.txt returned HTTP %s for %s", response.status, origin)
-                        return False
+                        deny()
+                        return _ROBOTS_DENIED
                     else:
                         body = await response.read()
                         if len(body) > 1_000_000:
                             logger.warning("robots.txt too large for %s", origin)
-                            return False
-                        parser.parse(body.decode(response.charset or "utf-8", errors="replace").splitlines())
+                            deny()
+                            return _ROBOTS_DENIED
+                        parser.parse(
+                            body.decode(response.charset or "utf-8", errors="replace").splitlines()
+                        )
                     break
             else:
                 logger.warning("Too many redirects fetching robots.txt for %s", origin)
-                return False
+                deny()
+                return _ROBOTS_DENIED
         except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError) as exc:
             logger.warning("robots.txt fetch failed for %s: %s", origin, exc)
-            return False
+            deny()
+            return _ROBOTS_DENIED
 
         self._robots_cache[origin] = (now + settings.ROBOTS_CACHE_TTL, parser)
-        return parser.can_fetch(self.user_agent, url)
+        return parser
 
     @staticmethod
     def _is_public_ip(ip_str: str) -> bool:
@@ -120,7 +168,10 @@ class CrawlerEngine:
             ip = ipaddress.ip_address(ip_str)
         except ValueError:
             return False
-        return not (
+        # ``is_global`` is stricter than the individual flags: it also rejects
+        # shared address space (100.64.0.0/10), documentation/benchmark ranges,
+        # IPv4-mapped loopback and other special-purpose blocks.
+        return bool(ip.is_global) and not (
             ip.is_private
             or ip.is_loopback
             or ip.is_link_local
@@ -211,8 +262,22 @@ class CrawlerEngine:
                             continue
 
                         content_type = response.headers.get("Content-Type", "").lower()
-                        if response.status != 200 or "text/html" not in content_type:
-                            await self.frontier.mark_failed(url, f"HTTP {response.status}; content-type={content_type}")
+                        if response.status != 200:
+                            # Client errors (404/403/410, ...) are permanent: retrying
+                            # them just hammers the origin and burns the retry budget.
+                            if 400 <= response.status < 500 and response.status not in RETRYABLE_STATUSES:
+                                await self.frontier.mark_skipped(
+                                    url, f"HTTP {response.status} (not retryable)"
+                                )
+                            else:
+                                await self.frontier.mark_failed(
+                                    url, f"HTTP {response.status}; content-type={content_type}"
+                                )
+                            return None
+                        if "text/html" not in content_type:
+                            await self.frontier.mark_skipped(
+                                url, f"unsupported content-type: {content_type or 'unknown'}"
+                            )
                             return None
 
                         chunks = []
@@ -225,7 +290,7 @@ class CrawlerEngine:
                             chunks.append(chunk)
 
                         body = b"".join(chunks)
-                        return body.decode(response.charset or "utf-8", errors="replace")
+                        return self._decode_body(body, response.charset)
                 except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError) as exc:
                     logger.warning("Fetch failed for %s: %s", current_url, exc)
                     await self.frontier.mark_failed(url, str(exc))
@@ -233,6 +298,24 @@ class CrawlerEngine:
 
         await self.frontier.mark_failed(url, "exceeded maximum redirect hops")
         return None
+
+    META_CHARSET_RE = re.compile(r"""charset\s*=\s*["']?([a-z0-9_\-]+)""", re.IGNORECASE)
+
+    @classmethod
+    def _decode_body(cls, body: bytes, declared_charset: Optional[str]) -> str:
+        """Decode a response body, falling back to a <meta charset> declaration."""
+        charset = declared_charset
+        if not charset:
+            head = body[:4096].decode("ascii", errors="ignore")
+            match = cls.META_CHARSET_RE.search(head)
+            if match:
+                charset = match.group(1)
+        if charset:
+            try:
+                return body.decode(charset, errors="replace")
+            except (LookupError, TypeError):
+                logger.warning("Unknown charset %r; falling back to utf-8", charset)
+        return body.decode("utf-8", errors="replace")
 
     @staticmethod
     def extract_links(html: str, base_url: str) -> List[str]:
@@ -364,15 +447,42 @@ class CrawlerEngine:
     async def run_forever(self):
         last_recovery = 0.0
         recovery_interval = max(5.0, settings.WORKER_LEASE_TTL / 2)
+        consecutive_failures = 0
         while True:
             now = asyncio.get_running_loop().time()
             if now - last_recovery >= recovery_interval:
-                recovered = await self.frontier.recover_stale()
-                if recovered:
-                    logger.warning("Recovered %d stale crawler leases", recovered)
+                try:
+                    recovered = await self.frontier.recover_stale()
+                    if recovered:
+                        logger.warning("Recovered %d stale crawler leases", recovered)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # A degraded Redis must not take the worker down.
+                    logger.exception("Stale-lease recovery failed; will retry")
                 last_recovery = now
 
-            processed = await self.process_next()
+            try:
+                processed = await self.process_next()
+                consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Transient backend failures (Redis, DNS, ...) must not kill the
+                # worker loop: back off and keep crawling.
+                consecutive_failures += 1
+                delay = min(
+                    RUN_RETRY_MAX_BACKOFF,
+                    RUN_RETRY_BACKOFF * 2 ** min(consecutive_failures - 1, 4),
+                )
+                logger.exception(
+                    "Crawler iteration failed (%d in a row); retrying in %.1fs",
+                    consecutive_failures,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+
             if not processed or settings.MOCK_MODE:
                 await asyncio.sleep(1)
 

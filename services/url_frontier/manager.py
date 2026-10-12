@@ -15,6 +15,8 @@ from libs.schemas.models import CrawlStatus, URLMetadata
 
 logger = logging.getLogger("atlas.frontier")
 
+TERMINAL_STATUSES = {CrawlStatus.COMPLETED, CrawlStatus.FAILED, CrawlStatus.SKIPPED}
+
 
 class URLFrontier:
     """Redis-backed URL frontier for distributed crawler workers."""
@@ -35,16 +37,44 @@ class URLFrontier:
 
     @staticmethod
     def normalize_url(url: str) -> Optional[str]:
+        """Canonicalize a URL so that equivalent spellings deduplicate to one key.
+
+        Lowercases the scheme/host, drops default ports and fragments, and
+        removes a bare trailing slash. Query strings are preserved verbatim.
+        """
         try:
             parsed = urlparse(url.strip())
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                return None
-            normalized = urlunparse(parsed._replace(fragment=""))
-            if normalized.endswith("/") and parsed.path in {"", "/"}:
-                normalized = normalized.rstrip("/")
-            return normalized
         except ValueError:
             return None
+
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            return None
+
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if not host:
+            return None
+        try:
+            port = parsed.port
+        except ValueError:
+            # Malformed port (e.g. "http://host:abc/")
+            return None
+
+        scheme = parsed.scheme.lower()
+        netloc = host
+        if port and port != (443 if scheme == "https" else 80):
+            netloc = f"{host}:{port}"
+        if parsed.username:
+            userinfo = parsed.username
+            if parsed.password:
+                userinfo = f"{userinfo}:{parsed.password}"
+            netloc = f"{userinfo}@{netloc}"
+
+        path = parsed.path
+        if path == "/" and not parsed.query:
+            path = ""
+
+        normalized = urlunparse((scheme, netloc, path, parsed.params, parsed.query, ""))
+        return normalized or None
 
     @staticmethod
     def _key(url: str) -> str:
@@ -69,19 +99,78 @@ class URLFrontier:
                 continue
             key = self._key(url)
             if await self.redis.sadd(self.seen_key, key):
-                meta = URLMetadata(
-                    url=url,
-                    depth=depth,
-                    priority=priority,
-                    status=CrawlStatus.QUEUED,
-                    job_id=job_id,
-                )
-                await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
-                if job_id:
-                    await self.redis.sadd(f"{self.job_active_prefix}{job_id}", key)
-                await self.redis.zadd(self.queue_key, {url: priority})
+                await self._enqueue(url, key, depth, priority, job_id)
+                added += 1
+                continue
+            if await self._requeue_for_recrawl(url, key, depth, priority, job_id):
                 added += 1
         return added
+
+    async def _enqueue(
+        self,
+        url: str,
+        key: str,
+        depth: int,
+        priority: float,
+        job_id: Optional[str],
+    ) -> None:
+        meta = URLMetadata(
+            url=url,
+            depth=depth,
+            priority=priority,
+            status=CrawlStatus.QUEUED,
+            job_id=job_id,
+        )
+        await self.redis.set(f"{self.metadata_prefix}{key}", meta.model_dump_json())
+        if job_id:
+            await self.redis.sadd(f"{self.job_active_prefix}{job_id}", key)
+        await self.redis.zadd(self.queue_key, {url: priority})
+
+    async def _requeue_for_recrawl(
+        self,
+        url: str,
+        key: str,
+        depth: int,
+        priority: float,
+        job_id: Optional[str],
+    ) -> bool:
+        """Re-enqueue a previously crawled URL once its freshness window elapsed.
+
+        The global ``seen`` set prevents duplicate work within a crawl window,
+        but permanent deduplication would make recrawls (freshness) impossible.
+        Terminal URLs older than ``RECRAWL_INTERVAL`` are queued again.
+        """
+        interval = settings.RECRAWL_INTERVAL
+        if interval <= 0:
+            return False
+
+        raw = await self.redis.get(f"{self.metadata_prefix}{key}")
+        if not raw:
+            # Seen marker without metadata (e.g. pruned key): allow a fresh crawl.
+            await self._enqueue(url, key, depth, priority, job_id)
+            return True
+
+        try:
+            meta = URLMetadata.model_validate_json(raw)
+        except ValueError:
+            logger.warning("Discarding corrupt frontier metadata for %s", url)
+            await self.redis.delete(f"{self.metadata_prefix}{key}")
+            await self.redis.srem(self.seen_key, key)
+            return False
+
+        if meta.status not in TERMINAL_STATUSES:
+            return False
+
+        last_seen = meta.last_crawled_at or meta.discovered_at
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - last_seen).total_seconds()
+        if age < interval:
+            return False
+
+        logger.info("Recrawling %s (last seen %.0fs ago)", url, age)
+        await self._enqueue(url, key, depth, priority, job_id)
+        return True
 
     async def get_next_url(self) -> Optional[Tuple[str, int]]:
         if settings.MOCK_MODE:

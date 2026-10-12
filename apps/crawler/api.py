@@ -114,7 +114,13 @@ async def create_crawl(request: CreateCrawlRequest):
         job.status = CrawlJobStatus.FAILED
         job.updated_at = datetime.now(timezone.utc)
         await jobs.update(job)
-        raise HTTPException(status_code=503, detail="Unable to enqueue crawl seeds")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Unable to enqueue crawl seeds: they were either already crawled within "
+                "the recrawl window (see RECRAWL_INTERVAL) or the URL frontier is unavailable"
+            ),
+        )
 
     return job
 
